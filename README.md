@@ -47,6 +47,43 @@ The API is available at `http://localhost:3000`. Run `opencode` on your host at 
 its configuration and authentication file exist. Without them, listing and validating models
 still works, but model requests fail upstream.
 
+### Nix
+
+Run the API directly with Nix:
+
+```bash
+API_KEY=your-local-secret nix run github:mausch/opencode-cli-wrapper
+```
+
+The flake includes Node.js and OpenCode, so no separate installation is required. Your
+normal OpenCode configuration and login are used. The server reads `.env` from the current
+directory and listens on port `3000` by default; set `HOST`, `PORT`, or the other
+configuration variables below as needed.
+
+The `opencode` flake input defaults to the locked `nixpkgs` input. Override it to select
+OpenCode from another nixpkgs revision or from OpenCode's own flake:
+
+```bash
+API_KEY=your-local-secret nix run github:mausch/opencode-cli-wrapper \
+  --override-input opencode 'github:NixOS/nixpkgs/<revision>'
+
+API_KEY=your-local-secret nix run github:mausch/opencode-cli-wrapper \
+  --override-input opencode 'github:anomalyco/opencode/<revision>'
+```
+
+The source must export `packages.<system>.opencode`, `packages.<system>.default`, or
+`legacyPackages.<system>.opencode` (in that order of preference). To reuse an input from
+your own flake, set `inputs.wrapper.inputs.opencode.follows = "opencode"`, where `wrapper`
+is your input for this repository and `opencode` is your existing source input.
+
+The selected package takes precedence over `opencode` on your host `PATH`. To use an
+already-installed executable instead, set `OPENCODE_BIN` to its absolute path:
+
+```bash
+API_KEY=your-local-secret OPENCODE_BIN="$(command -v opencode)" \
+  nix run github:mausch/opencode-cli-wrapper
+```
+
 ## Usage
 
 Every request to the wrapper must include `Authorization: Bearer ${API_KEY}`, where `API_KEY` is
