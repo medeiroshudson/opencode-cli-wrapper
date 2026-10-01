@@ -54,6 +54,11 @@ the local wrapper key you configured above. The separate `x-opencode-key` header
 passes an upstream OpenCode credential for a chat request; it never authenticates access to the
 wrapper. This includes `/health` and `/models.dev.json`.
 
+The full catalog is available with the wrapper Bearer key alone, including models from providers
+you have already logged into through OpenCode. Chat requests use the server's existing OpenCode
+configuration and credentials; `x-opencode-key` is not required to list or select non-free models.
+It is only needed when you want to supply a separate upstream OpenCode key for a request.
+
 List available models:
 
 ```bash

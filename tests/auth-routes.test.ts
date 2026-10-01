@@ -19,6 +19,7 @@ vi.mock("../src/lib/opencode/runner.js", async (importOriginal) => {
 
 const catalog = [
   { canonical: "opencode/mimo-v2.6-flash-free", provider: "opencode", id: "mimo-v2.6-flash-free", limits: null },
+  { canonical: "openai/gpt-6-luna", provider: "openai", id: "gpt-6-luna", limits: null },
 ];
 const authorization = { authorization: "Bearer test-inbound-key" };
 const chatPayload = { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] };
@@ -120,7 +121,25 @@ describe("Global route authentication", () => {
     expect(runOnceMock.mock.calls[0]?.[1]).not.toHaveProperty("OPENCODE_API_KEY", "test-inbound-key");
   });
 
-  it("does not set an OpenCode key when x-opencode-key is absent", async () => {
+  it.each(["gpt-6-luna", "openai/gpt-6-luna"])("uses existing provider credentials for %s without x-opencode-key", async (model) => {
+    vi.stubEnv("OPENCODE_API_KEY", "");
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: authorization,
+      payload: { ...chatPayload, model },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().choices[0].message.content).toBe("hello");
+    expect(runOnceMock).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "openai/gpt-6-luna" }),
+      expect.objectContaining({ OPENCODE_API_KEY: "" }),
+    );
+  });
+
+  it("preserves a server-configured OpenCode key when x-opencode-key is absent", async () => {
+    vi.stubEnv("OPENCODE_API_KEY", "server-upstream-key");
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
@@ -129,6 +148,6 @@ describe("Global route authentication", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(runOnceMock.mock.calls[0]?.[1]).not.toHaveProperty("OPENCODE_API_KEY");
+    expect(runOnceMock.mock.calls[0]?.[1]).toHaveProperty("OPENCODE_API_KEY", "server-upstream-key");
   });
 });

@@ -39,7 +39,7 @@ describe("Routes (P6/P7)", () => {
     useRealCatalog.value = false;
   });
 
-  it("GET /v1/models returns only free ids without an upstream key", async () => {
+  it("GET /v1/models returns all catalog ids without an upstream key", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
 
     expect(res.statusCode).toBe(200);
@@ -48,6 +48,7 @@ describe("Routes (P6/P7)", () => {
       data: [
         { id: "mimo-v2.6-flash-free", object: "model", owned_by: "opencode", context_length: 200000, max_model_len: 200000, max_output_tokens: 32000, max_input_tokens: 160000 },
         { id: "space-bunny-free", object: "model", owned_by: "opencode" },
+        { id: "claude-opus-5", object: "model", owned_by: "opencode", context_length: 100, max_model_len: 100, max_output_tokens: 20 },
       ],
     });
   });
@@ -118,12 +119,12 @@ describe("Routes (P6/P7)", () => {
     expect(res.json().error.type).toBe("invalid_request_error");
   });
 
-  it("rejects a model outside the visible catalog with 404", async () => {
+  it("rejects a model outside the catalog with 404", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
       headers: inboundHeaders,
-      payload: { model: "opencode/claude-opus-5", messages: [{ role: "user", content: "hi" }] },
+      payload: { model: "unknown/missing-model", messages: [{ role: "user", content: "hi" }] },
     });
 
     expect(res.statusCode).toBe(404);
@@ -133,15 +134,14 @@ describe("Routes (P6/P7)", () => {
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;
 
   itIntegration(
-    "returns only free models without x-opencode-key and more models with x-opencode-key",
+    "returns the same full catalog with and without x-opencode-key",
     async () => {
       useRealCatalog.value = true;
-      const freeResponse = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
+      const response = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
 
-      expect(freeResponse.statusCode).toBe(200);
-      const freeModels = freeResponse.json().data as Array<{ id: string }>;
-      expect(freeModels.length).toBeGreaterThan(0);
-      expect(freeModels.every((model) => model.id.endsWith("-free"))).toBe(true);
+      expect(response.statusCode).toBe(200);
+      const models = response.json().data as Array<{ id: string }>;
+      expect(models.length).toBeGreaterThan(0);
 
       const authenticatedResponse = await app.inject({
         method: "GET",
@@ -151,13 +151,13 @@ describe("Routes (P6/P7)", () => {
 
       expect(authenticatedResponse.statusCode).toBe(200);
       const authenticatedModels = authenticatedResponse.json().data as Array<{ id: string }>;
-      expect(authenticatedModels.length).toBeGreaterThan(freeModels.length);
+      expect(authenticatedModels).toEqual(models);
     },
     120_000,
   );
 
   itIntegration(
-    "rejects a non-free model without x-opencode-key",
+    "rejects an unknown model without x-opencode-key",
     async () => {
       useRealCatalog.value = true;
       const res = await app.inject({
@@ -165,7 +165,7 @@ describe("Routes (P6/P7)", () => {
         url: "/v1/chat/completions",
         headers: inboundHeaders,
         payload: {
-          model: "opencode/claude-opus-5",
+          model: "unknown/missing-model",
           messages: [{ role: "user", content: "hi" }],
         },
       });

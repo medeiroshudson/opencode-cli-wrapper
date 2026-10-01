@@ -63,7 +63,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
 
       let canonicalModel: string;
       try {
-        canonicalModel = resolveModel(body.model, auth, entries);
+        canonicalModel = resolveModel(body.model, entries);
       } catch (err) {
         if (err instanceof ModelNotFoundError) {
           const mapped = toOpenAIErrorBody(err, 404);

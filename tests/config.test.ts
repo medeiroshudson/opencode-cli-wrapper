@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import type { AuthContext } from "../src/lib/opencode/auth.js";
 import type { CatalogEntry } from "../src/lib/opencode/models.js";
 import {
   getTimeoutMs,
@@ -10,7 +9,6 @@ import {
   resolveModel,
   resolveOpencodeBin,
   resolveProxyEnv,
-  visibleModels,
 } from "../src/config/index.js";
 
 const entries: CatalogEntry[] = [
@@ -19,20 +17,9 @@ const entries: CatalogEntry[] = [
   { canonical: "opencode/claude-opus-5", provider: "opencode", id: "claude-opus-5", limits: { context: 100, input: null, output: 20 } },
 ];
 
-const noAuth: AuthContext = { enabled: false, token: null };
-const withAuth: AuthContext = { enabled: true, token: "key" };
-
 describe("config module", () => {
-  it("shows only free ids without auth", () => {
-    expect(visibleModels(entries, noAuth)).toEqual(entries.slice(0, 2));
-  });
-
-  it("shows every catalog entry with auth", () => {
-    expect(visibleModels(entries, withAuth)).toEqual(entries);
-  });
-
   it("lists model ids and providers in catalog order", () => {
-    expect(listModels(withAuth, entries)).toEqual({
+    expect(listModels(entries)).toEqual({
       object: "list",
       data: [
         { id: "mimo-v2.6-flash-free", object: "model", owned_by: "opencode", context_length: 200000, max_model_len: 200000, max_output_tokens: 32000, max_input_tokens: 160000 },
@@ -55,20 +42,20 @@ describe("config module", () => {
     expect(modelsDevMetadata([entries[1]])).toEqual({ "space-bunny-free": { id: "space-bunny-free" } });
   });
 
-  it("resolves a visible short id to its canonical id", () => {
-    expect(resolveModel("mimo-v2.6-flash-free", noAuth, entries)).toBe("opencode/mimo-v2.6-flash-free");
+  it("resolves a non-free short id to its canonical id", () => {
+    expect(resolveModel("claude-opus-5", entries)).toBe("opencode/claude-opus-5");
   });
 
-  it("resolves a visible canonical id", () => {
-    expect(resolveModel("opencode/mimo-v2.6-flash-free", noAuth, entries)).toBe("opencode/mimo-v2.6-flash-free");
+  it("resolves a non-free canonical id", () => {
+    expect(resolveModel("opencode/claude-opus-5", entries)).toBe("opencode/claude-opus-5");
   });
 
-  it("rejects a model outside the visible catalog", () => {
-    expect(() => resolveModel("gpt-4", withAuth, entries)).toThrow(ModelNotFoundError);
+  it("rejects a model outside the catalog", () => {
+    expect(() => resolveModel("gpt-4", entries)).toThrow(ModelNotFoundError);
   });
 
   it("rejects every id when the catalog is empty", () => {
-    expect(() => resolveModel("mimo-v2.6-flash-free", withAuth, [])).toThrow(ModelNotFoundError);
+    expect(() => resolveModel("mimo-v2.6-flash-free", [])).toThrow(ModelNotFoundError);
   });
 
   it("keeps getTimeoutMs default and fallback behavior", () => {
@@ -127,15 +114,15 @@ describe("ZEN model preference", () => {
   ];
 
   it("resolves a short id shared by ZEN and GO to the ZEN provider", () => {
-    expect(resolveModel("space-bunny-free", noAuth, dual)).toBe("opencode/space-bunny-free");
+    expect(resolveModel("space-bunny-free", dual)).toBe("opencode/space-bunny-free");
   });
 
   it("still honors an explicit GO canonical id", () => {
-    expect(resolveModel("opencode-go/space-bunny-free", noAuth, dual)).toBe("opencode-go/space-bunny-free");
+    expect(resolveModel("opencode-go/space-bunny-free", dual)).toBe("opencode-go/space-bunny-free");
   });
 
   it("lists a single entry per id, preferring ZEN", () => {
-    expect(listModels(noAuth, dual)).toEqual({
+    expect(listModels(dual)).toEqual({
       object: "list",
       data: [
         { id: "space-bunny-free", object: "model", owned_by: "opencode" },
