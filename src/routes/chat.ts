@@ -129,10 +129,12 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         let started = false;
         let roleSent = false;
         let disconnected = false;
-        // A consumer that goes away mid-turn flips this; onDelta then throws so the
-        // turn aborts and deletes its session instead of leaking the generation.
+        // A consumer that goes away mid-turn aborts this controller; runStreamingTurn
+        // then stops the generation and deletes the session instead of leaking it.
+        const disconnect = new AbortController();
         request.raw.on("close", () => {
           disconnected = true;
+          disconnect.abort();
         });
 
         const writeChunk = (delta: DeltaContent, finish: string | null): void => {
@@ -153,6 +155,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         try {
           const result = await runStreamingTurn(client, {
             ...turnParams,
+            signal: disconnect.signal,
             onDelta: (chunk) => {
               if (disconnected || reply.raw.destroyed || reply.raw.writableEnded) {
                 throw new Error("client disconnected");

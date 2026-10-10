@@ -17,6 +17,9 @@ export interface TurnParams {
 
 export interface StreamingParams extends TurnParams {
   onDelta: (chunk: string) => void;
+  // Optional caller signal (e.g. the HTTP request closing). When it aborts, the
+  // turn stops and runs the same abort+delete cleanup as a consumer failure.
+  signal?: AbortSignal;
 }
 
 function mapUsage(tokens: ServeTokens | undefined): TurnResult["usage"] {
@@ -76,6 +79,19 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
   const emptyResponse: ServeMessageResponse = { info: {}, parts: [] };
   let assembled = "";
   let aborted = false;
+
+  // A caller-supplied signal (route disconnect) aborts the turn too, even when no
+  // further delta ever arrives to trigger onDelta.
+  const external = params.signal;
+  const onExternalAbort = (): void => {
+    aborted = true;
+    controller.abort();
+  };
+  if (external) {
+    if (external.aborted) onExternalAbort();
+    else external.addEventListener("abort", onExternalAbort);
+  }
+
   try {
     const payload: Record<string, unknown> = {
       model: params.model,
@@ -89,22 +105,32 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
     // Swallow a late rejection when we skip awaiting `posted` after an abort.
     posted.catch(() => undefined);
 
-    for await (const ev of stream) {
-      const delta = textDelta(ev);
-      if (delta !== null) {
-        assembled += delta;
-        try {
-          params.onDelta(delta);
-        } catch {
-          aborted = true;
-          controller.abort();
-          break;
+    try {
+      for await (const ev of stream) {
+        if (aborted) break;
+        const delta = textDelta(ev);
+        if (delta !== null) {
+          assembled += delta;
+          try {
+            params.onDelta(delta);
+          } catch {
+            aborted = true;
+            controller.abort();
+            break;
+          }
+        } else {
+          const full = partText(ev);
+          if (full !== null && assembled.length === 0) assembled = full;
         }
-      } else {
-        const full = partText(ev);
-        if (full !== null && assembled.length === 0) assembled = full;
+        if (isFinish(ev)) break;
       }
-      if (isFinish(ev)) break;
+    } catch (error) {
+      // The event stream dropped mid-turn: stop the generation before cleanup, then
+      // rethrow unless we already initiated the abort ourselves (signal/onDelta).
+      const selfInflicted = aborted;
+      aborted = true;
+      controller.abort();
+      if (!selfInflicted) throw error;
     }
 
     // On abort, do NOT await the in-flight message: it resolves only when the
@@ -122,6 +148,7 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
       toolCalls,
     };
   } finally {
+    if (external) external.removeEventListener("abort", onExternalAbort);
     if (aborted) await client.abortSession(sessionId).catch(() => undefined);
     await client.deleteSession(sessionId).catch(() => undefined);
   }

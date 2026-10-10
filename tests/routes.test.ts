@@ -260,6 +260,83 @@ describe("Routes (P6/P7)", () => {
     expect(deleteSpy).toHaveBeenCalled();
   });
 
+  it("aborts and deletes the session when the event stream drops mid-turn", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    const abortSpy = vi.spyOn(client, "abortSession").mockResolvedValue(undefined);
+    const deleteSpy = vi.spyOn(client, "deleteSession").mockResolvedValue(undefined);
+    abortSpy.mockClear();
+    deleteSpy.mockClear();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "x" } };
+      throw new Error("event stream dropped");
+    } as never;
+
+    const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
+    await runStreamingTurn(client, {
+      model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+      prompt: "hi",
+      tools: [],
+      toolChoice: "auto",
+      onDelta: () => {},
+    }).catch(() => undefined);
+
+    expect(abortSpy).toHaveBeenCalled();
+    expect(deleteSpy).toHaveBeenCalled();
+  });
+
+  it("aborts and deletes the session when the caller signal is aborted", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    const abortSpy = vi.spyOn(client, "abortSession").mockResolvedValue(undefined);
+    const deleteSpy = vi.spyOn(client, "deleteSession").mockResolvedValue(undefined);
+    abortSpy.mockClear();
+    deleteSpy.mockClear();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "x" } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+
+    const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
+    await runStreamingTurn(client, {
+      model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+      prompt: "hi",
+      tools: [],
+      toolChoice: "auto",
+      signal: AbortSignal.abort(),
+      onDelta: () => {},
+    }).catch(() => undefined);
+
+    expect(abortSpy).toHaveBeenCalled();
+    expect(deleteSpy).toHaveBeenCalled();
+  });
+
+  it("does not abort the session on a normal stream completion", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    const abortSpy = vi.spyOn(client, "abortSession").mockResolvedValue(undefined);
+    const deleteSpy = vi.spyOn(client, "deleteSession").mockResolvedValue(undefined);
+    abortSpy.mockClear();
+    deleteSpy.mockClear();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "ok" } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+
+    const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
+    const result = await runStreamingTurn(client, {
+      model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+      prompt: "hi",
+      tools: [],
+      toolChoice: "auto",
+      onDelta: () => {},
+    });
+
+    expect(result.content).toBe("ok");
+    expect(deleteSpy).toHaveBeenCalled();
+    expect(abortSpy).not.toHaveBeenCalled();
+  });
+
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;
 
   itIntegration(
