@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { ServeStartupError, ServeSupervisor } from "../src/lib/serve/process.js";
+import { defaultServeDeps, ServeStartupError, ServeSupervisor } from "../src/lib/serve/process.js";
+import { buildChildEnv } from "../src/config/index.js";
 
 function deps(overrides: Record<string, unknown> = {}) {
   return {
@@ -81,5 +82,34 @@ describe("ServeSupervisor", () => {
     healthy = true;
     await Promise.all([first, second]);
     expect(spawnServe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("defaultServeDeps", () => {
+  it("spawns opencode serve with the proxied child environment", () => {
+    const spawnImpl = vi.fn((_bin: string, _args: readonly string[], _opts: { env?: NodeJS.ProcessEnv }) => ({
+      kill: vi.fn(),
+    }));
+    const client = { health: vi.fn(async () => true) };
+    // OPENCODE_PROXY_URL is mapped onto HTTP(S)_PROXY; the ambient HTTP_PROXY is scrubbed.
+    const env = {
+      PATH: "/bin",
+      OPENCODE_PROXY_URL: "http://proxy.corp:8080",
+      HTTP_PROXY: "http://ambient:8080",
+    };
+
+    const d = defaultServeDeps(client as never, spawnImpl as never, env);
+    d.spawnServe("opencode", 4100);
+
+    expect(spawnImpl).toHaveBeenCalledWith(
+      "opencode",
+      ["serve", "--port", "4100", "--hostname", "127.0.0.1"],
+      expect.objectContaining({ env: buildChildEnv(env) }),
+    );
+    const spawnedEnv = spawnImpl.mock.calls[0]?.[2]?.env;
+    expect(spawnedEnv?.HTTP_PROXY).toBe("http://proxy.corp:8080");
+    expect(spawnedEnv?.HTTPS_PROXY).toBe("http://proxy.corp:8080");
+    expect(spawnedEnv?.NO_PROXY).toBe("localhost,127.0.0.1,::1");
+    expect(spawnedEnv?.PATH).toBe("/bin");
   });
 });

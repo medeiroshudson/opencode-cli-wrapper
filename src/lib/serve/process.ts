@@ -1,7 +1,13 @@
 // PHASE S4 — supervision of the locally spawned `opencode serve` daemon.
 
 import { spawn } from "node:child_process";
-import { getServeBaseUrl, getServePort, getServeReadinessTimeoutMs, resolveOpencodeBin } from "../../config/index.js";
+import {
+  buildChildEnv,
+  getServeBaseUrl,
+  getServePort,
+  getServeReadinessTimeoutMs,
+  resolveOpencodeBin,
+} from "../../config/index.js";
 import type { ServeClient } from "./client.js";
 
 export interface SpawnedChild { kill(): void }
@@ -75,7 +81,11 @@ export class ServeSupervisor {
   }
 }
 
-export function defaultServeDeps(client: ServeClient): ServeProcessDeps {
+export function defaultServeDeps(
+  client: ServeClient,
+  spawnImpl: typeof spawn = spawn,
+  env: NodeJS.ProcessEnv = process.env,
+): ServeProcessDeps {
   return {
     baseUrl: getServeBaseUrl(),
     port: getServePort(),
@@ -83,8 +93,12 @@ export function defaultServeDeps(client: ServeClient): ServeProcessDeps {
     readinessTimeoutMs: getServeReadinessTimeoutMs(),
     isHealthy: () => client.health(),
     spawnServe: (bin, port) =>
-      spawn(bin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], {
+      spawnImpl(bin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], {
         stdio: ["ignore", "inherit", "inherit"],
+        // The daemon makes the outbound model requests, so it gets the wrapper's
+        // proxy configuration: OPENCODE_PROXY_URL mapped onto HTTP(S)_PROXY, with
+        // ambient proxy variables scrubbed (see buildChildEnv).
+        env: buildChildEnv(env),
       }),
   };
 }
