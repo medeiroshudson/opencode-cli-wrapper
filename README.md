@@ -181,8 +181,8 @@ OpenCode key header. The OpenAI SDK's `apiKey` configures the wrapper Bearer cre
 | `PORT` | `3000` | API port |
 | `API_KEY` | required | Secret used to authenticate wrapper requests with `Authorization: Bearer <API_KEY>` |
 | `OPENCODE_BIN` | `opencode` | OpenCode CLI command or path used to spawn the `opencode serve` daemon |
-| `OPENCODE_PORT` | `4100` | Loopback port the supervised `opencode serve` daemon listens on |
-| `OPENCODE_BASE` | unset | Base URL of an existing `opencode serve` API to use instead of spawning one; overrides `OPENCODE_PORT` |
+| `OPENCODE_PORT` | `4100` | Port the wrapper spawns its own `opencode serve` daemon on; ignored when `OPENCODE_BASE` names a port on a loopback host |
+| `OPENCODE_BASE` | unset | Base URL of the `opencode serve` API to use. A loopback URL makes the wrapper supervise the daemon on that URL's port (so `OPENCODE_PORT` does not apply); a non-loopback URL is used as-is and never spawned locally |
 | `OPENCODE_TIMEOUT_MS` | `120000` | Timeout for a chat request served over the serve API, in milliseconds |
 | `OPENCODE_SERVE_READY_TIMEOUT_MS` | `20000` | How long to wait for the supervised daemon to become healthy, in milliseconds |
 | `OPENCODE_MODELS_TTL_MS` | `300000` | How long to cache the model list, in milliseconds |
@@ -219,8 +219,11 @@ unavailable; upstream PR #10856 closed without merging, so configure the proxy w
 
 ## How it works
 
-On the first request, the wrapper starts and supervises a local `opencode serve` daemon — or uses
-the one at `OPENCODE_BASE` — waiting until it is healthy before serving traffic. Each request
+On the first request, the wrapper starts and supervises a local `opencode serve` daemon, waiting
+until it is healthy before serving traffic. `OPENCODE_BASE` changes which daemon that is: a
+loopback URL makes the wrapper supervise (and spawn, if needed) the daemon on that URL's port,
+while an off-host URL is used as-is and is never replaced by a local process — if such a server is
+unhealthy the wrapper fails the request with a clear startup error instead. Each request
 translates the API call into a session on that daemon: the conversation is sent as a single prompt,
 and the response is returned in the OpenAI format. When streaming is enabled, SSE forwards the
 daemon's incremental text deltas. The daemon is stopped when the wrapper shuts down.

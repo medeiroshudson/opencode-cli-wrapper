@@ -3,10 +3,9 @@
 import { spawn } from "node:child_process";
 import {
   buildChildEnv,
-  getServeBaseUrl,
-  getServePort,
   getServeReadinessTimeoutMs,
   resolveOpencodeBin,
+  resolveServeEndpoint,
 } from "../../config/index.js";
 import type { ServeClient } from "./client.js";
 
@@ -14,7 +13,8 @@ export interface SpawnedChild { kill(): void }
 
 export interface ServeProcessDeps {
   baseUrl: string;
-  port: number;
+  /** Port to spawn the local daemon on; null when the endpoint is remote. */
+  spawnPort: number | null;
   bin: string;
   readinessTimeoutMs: number;
   isHealthy: () => Promise<boolean>;
@@ -54,7 +54,13 @@ export class ServeSupervisor {
 
   private async start(): Promise<void> {
     if (await this.deps.isHealthy()) return;
-    this.child = this.deps.spawnServe(this.deps.bin, this.deps.port);
+    const port = this.deps.spawnPort;
+    if (port === null) {
+      throw new ServeStartupError(
+        `opencode serve at ${this.deps.baseUrl} is not healthy and OPENCODE_BASE points off-host, so no local daemon is spawned`,
+      );
+    }
+    this.child = this.deps.spawnServe(this.deps.bin, port);
     const deadline = Date.now() + this.deps.readinessTimeoutMs;
     while (Date.now() < deadline) {
       if (await this.deps.isHealthy()) return;
@@ -86,10 +92,14 @@ export function defaultServeDeps(
   spawnImpl: typeof spawn = spawn,
   env: NodeJS.ProcessEnv = process.env,
 ): ServeProcessDeps {
+  // The spawn port comes from the SAME endpoint the client polls, so a loopback
+  // OPENCODE_BASE without OPENCODE_PORT starts the daemon where the base URL points
+  // instead of spawning on the default port and polling the configured one forever.
+  const endpoint = resolveServeEndpoint(env);
   return {
-    baseUrl: getServeBaseUrl(),
-    port: getServePort(),
-    bin: resolveOpencodeBin(),
+    baseUrl: endpoint.url,
+    spawnPort: endpoint.spawnPort,
+    bin: resolveOpencodeBin(env),
     readinessTimeoutMs: getServeReadinessTimeoutMs(),
     isHealthy: () => client.health(),
     spawnServe: (bin, port) =>

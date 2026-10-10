@@ -2,9 +2,18 @@
 // Flattens the OpenAI messages[] into one prompt for a single `opencode run`,
 // because OpenCode sessions do not recall previous turns (docs/plan.md §3.5-§3.6).
 
+// An OpenAI assistant turn may carry tool calls with `content: null`; the tool result
+// comes back on a later `role: "tool"` message.
+export interface ChatToolCall {
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 export interface ChatMessage {
   role: string;
-  content: string;
+  content: string | null;
+  tool_calls?: ChatToolCall[];
 }
 
 export function normalizeContent(content: unknown): string {
@@ -30,7 +39,10 @@ export function composePrompt(messages: ChatMessage[]): string {
       systemContents.push(content);
     } else {
       const label = role ? toTitleCase(role) : "Unknown";
-      history.push(`${label}: ${content}`);
+      // Without the calls, an assistant turn that only called a tool renders as an
+      // empty line and the model sees a tool result with no visible request.
+      const calls = role.toLowerCase() === "assistant" ? renderToolCalls(message?.tool_calls) : "";
+      history.push(`${label}: ${[content, calls].filter((part) => part.length > 0).join(" ")}`);
     }
   }
 
@@ -70,6 +82,11 @@ export function buildAnchorLine(anchors: PromptAnchors): string | null {
 export function applyAnchors(prompt: string, anchors: PromptAnchors): string {
   const line = buildAnchorLine(anchors);
   return line ? `${prompt}\n\n${line}` : prompt;
+}
+
+function renderToolCalls(toolCalls: unknown): string {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return "";
+  return JSON.stringify({ tool_calls: toolCalls });
 }
 
 function toTitleCase(value: string): string {

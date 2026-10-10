@@ -36,7 +36,8 @@ const chatBodySchema = {
           required: ["role", "content"],
           properties: {
             role: { type: "string" },
-            content: { type: "string" },
+            // An OpenAI assistant turn that only calls a tool sends `content: null`.
+            content: { type: ["string", "null"] },
           },
         },
       },
@@ -145,6 +146,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         const created = Math.floor(Date.now() / 1000);
         let started = false;
         let roleSent = false;
+        let contentStreamed = false;
         // A consumer that goes away mid-turn aborts this controller; runStreamingTurn
         // then stops the generation and deletes the session instead of leaking it.
         const disconnect = new AbortController();
@@ -173,6 +175,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
               if (disconnect.signal.aborted || reply.raw.destroyed || reply.raw.writableEnded) {
                 throw new Error("client disconnected");
               }
+              contentStreamed = true;
               writeChunk({ content: chunk }, null);
             },
           });
@@ -190,6 +193,9 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
             }
             writeChunk({}, "tool_calls");
           } else {
+            // A required/named turn buffers its content instead of streaming it, so a
+            // model that ignored the schema still delivers its prose.
+            if (!contentStreamed && result.content) writeChunk({ content: result.content }, null);
             writeChunk({}, result.finish_reason);
           }
           reply.raw.write(SSE_DONE);
@@ -198,6 +204,9 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
           // Headers are already on the wire; surface the failure inside the stream.
           if (started) {
             reply.raw.write(sseEvent({ error: mapped.body.error }));
+            // Terminate explicitly: a client keyed on [DONE] would otherwise treat the
+            // error frame as a truncated stream and wait for more.
+            reply.raw.write(SSE_DONE);
           } else {
             reply.status(mapped.status).send(mapped.body);
             return;

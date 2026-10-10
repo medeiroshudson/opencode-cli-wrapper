@@ -74,12 +74,47 @@ export function getServePort(env: NodeJS.ProcessEnv = process.env): number {
   return 4100;
 }
 
-export function getServeBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+export interface ServeEndpoint {
+  /** Base URL the client talks to; the same value the supervisor health-checks. */
+  readonly url: string;
+  /** Port the wrapper spawns its own daemon on; null when the endpoint is remote. */
+  readonly spawnPort: number | null;
+}
+
+// Anything loopback is a daemon the wrapper may own: only then is spawning on the
+// endpoint's own port meaningful.
+export function isLoopbackHost(hostname: string): boolean {
+  return /^(localhost|\[?::1\]?|127(?:\.\d{1,3}){3})$/i.test(hostname);
+}
+
+export function resolveServeEndpoint(env: NodeJS.ProcessEnv = process.env): ServeEndpoint {
   const configured = env.OPENCODE_BASE;
-  if (typeof configured === "string" && configured.trim().length > 0) {
-    return configured.trim().replace(/\/+$/, "");
+  if (typeof configured !== "string" || configured.trim().length === 0) {
+    const port = getServePort(env);
+    return { url: `http://127.0.0.1:${port}`, spawnPort: port };
   }
-  return `http://127.0.0.1:${getServePort(env)}`;
+
+  const url = configured.trim().replace(/\/+$/, "");
+  let parsed: URL | null = null;
+  try {
+    parsed = new URL(url);
+  } catch {
+    parsed = null;
+  }
+
+  // A non-loopback (or unparseable) OPENCODE_BASE is somebody else's daemon: use it
+  // as-is and never spawn locally, because a child on OPENCODE_PORT could not be
+  // reached through that URL anyway.
+  if (!parsed || !isLoopbackHost(parsed.hostname)) return { url, spawnPort: null };
+
+  // Loopback: the spawned daemon must listen where the base URL points, otherwise
+  // readiness polls a port nothing was started on. A base URL with no explicit port
+  // is used as-is (spawning on 80/443 is not ours to assume).
+  return { url, spawnPort: parsed.port ? Number(parsed.port) : null };
+}
+
+export function getServeBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveServeEndpoint(env).url;
 }
 
 export function getServeReadinessTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -115,6 +150,9 @@ function finiteNumber(value: number | null | undefined): value is number {
 }
 
 export function visibleModels(entries: CatalogEntry[], auth: AuthContext): CatalogEntry[] {
+  // The wrapper always authenticates its own requests, so the credential-less branch
+  // is not reached by a route today. It stays because it encodes the free-tier
+  // promise for the callers that pass an AuthContext without a credential.
   return auth.enabled ? entries : entries.filter((entry) => entry.id.endsWith("-free"));
 }
 

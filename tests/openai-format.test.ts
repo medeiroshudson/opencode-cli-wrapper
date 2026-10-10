@@ -5,7 +5,6 @@ import {
   buildChunk,
   sseEvent,
   SSE_DONE,
-  buildSseBody,
   toOpenAIErrorBody,
 } from "../src/lib/openai-format/index.js";
 import type { TurnResult } from "../src/lib/openai-format/index.js";
@@ -47,17 +46,6 @@ describe("OpenAI format layer (P5)", () => {
 describe("SSE helpers", () => {
   it("sseEvent formats a payload as a data frame", () => {
     expect(sseEvent({ a: 1 })).toBe(`data: ${JSON.stringify({ a: 1 })}\n\n`);
-  });
-
-  it("buildSseBody emits a content chunk, a final chunk, then DONE", () => {
-    const body = buildSseBody(
-      { content: "chunked", finish_reason: "stop", usage: null, sessionId: null, toolCalls: [] },
-      "gpt-4",
-    );
-
-    expect(body).toContain("chat.completion.chunk");
-    expect(body).toContain('"content":"chunked"');
-    expect(body.endsWith(SSE_DONE)).toBe(true);
   });
 
   it("SSE_DONE is the exact OpenAI terminator", () => {

@@ -19,7 +19,9 @@ export interface ServeTokens {
   cache?: { read?: number; write?: number };
 }
 export interface ServeMessageResponse {
-  info?: { finish?: string; tokens?: ServeTokens };
+  // `structured` carries the `format: json_schema` result ({name, arguments}); it is
+  // NOT returned as a text part, so a schema-constrained turn must read it here.
+  info?: { finish?: string; tokens?: ServeTokens; structured?: unknown };
   parts?: Array<{ type: string; text?: string }>;
 }
 
@@ -45,9 +47,14 @@ export class ServeClient {
   }
 
   private async request(path: string, init: RequestInit = {}): Promise<Response> {
+    // The wall-clock deadline is ALWAYS in force: a caller-supplied signal narrows
+    // it, it never replaces it. Passing the caller signal through unchanged left the
+    // SSE subscription with no deadline at all, so a turn whose message POST failed
+    // fast (upstream 4xx/5xx) waited forever for a `session.idle` that never came.
+    const deadline = AbortSignal.timeout(this.opts.timeoutMs);
     return this.fetchImpl(`${this.opts.baseUrl}${path}`, {
       ...init,
-      signal: init.signal ?? AbortSignal.timeout(this.opts.timeoutMs),
+      signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
     });
   }
 

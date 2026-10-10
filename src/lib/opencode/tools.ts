@@ -85,6 +85,84 @@ export interface ParsedCall {
   arguments: string;
 }
 
+const FENCE_START = "```tool_call";
+
+// The earliest index at which `text` could still be the beginning of a fence
+// opening: a trailing fragment that a later delta could complete into FENCE_START.
+function partialFenceStart(text: string): number | null {
+  const max = Math.min(FENCE_START.length - 1, text.length);
+  for (let length = max; length >= 1; length--) {
+    if (FENCE_START.startsWith(text.slice(text.length - length))) return text.length - length;
+  }
+  return null;
+}
+
+export interface FenceGuard {
+  // Appends a raw delta and returns the text that is safe to emit as content.
+  push(chunk: string): string;
+  // Returns the remaining safe content at end of stream; an unterminated fence is
+  // dropped, never emitted as content.
+  flush(): string;
+}
+
+// Streaming cannot un-emit a delta, so a ```tool_call fence must be held back until
+// it is known to be one. Text before a possible fence start is released immediately;
+// the fence (and its body) never reaches the caller as content — the call itself is
+// parsed out of the assembled text at the end of the turn.
+export function createFenceGuard(): FenceGuard {
+  let pending = "";
+  let insideFence = false;
+
+  const drain = (final: boolean): string => {
+    let out = "";
+    for (;;) {
+      if (insideFence) {
+        const close = pending.indexOf("```");
+        if (close < 0) {
+          if (final) pending = "";
+          return out;
+        }
+        pending = pending.slice(close + 3);
+        insideFence = false;
+        continue;
+      }
+
+      const marker = pending.indexOf(FENCE_START);
+      const partial = partialFenceStart(pending);
+      const limit = Math.min(
+        marker < 0 ? Number.POSITIVE_INFINITY : marker,
+        partial ?? Number.POSITIVE_INFINITY,
+      );
+      if (limit === Number.POSITIVE_INFINITY) {
+        out += pending;
+        pending = "";
+        return out;
+      }
+
+      out += pending.slice(0, limit);
+      pending = pending.slice(limit);
+      if (pending.startsWith(FENCE_START)) {
+        pending = pending.slice(FENCE_START.length);
+        insideFence = true;
+        continue;
+      }
+      // Only an ambiguous fragment is left: hold it until more text arrives.
+      if (final) pending = "";
+      return out;
+    }
+  };
+
+  return {
+    push(chunk: string): string {
+      pending += chunk;
+      return drain(false);
+    },
+    flush(): string {
+      return drain(true);
+    },
+  };
+}
+
 const FENCE = /```tool_call\s*([\s\S]*?)```/g;
 
 function tryParseCall(raw: string, known: ReadonlySet<string> | undefined): ParsedCall | null {

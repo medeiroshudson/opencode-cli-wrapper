@@ -3,7 +3,8 @@
 import type { ServeClient, ServeMessageResponse, ServeTokens } from "../serve/client.js";
 import type { TurnResult } from "../openai-format/index.js";
 import { isFinish, partText, textDelta } from "../serve/events.js";
-import { buildToolJsonSchema, parseToolCalls, toolChoiceMode } from "./tools.js";
+import { buildToolJsonSchema, createFenceGuard, parseToolCalls, toolChoiceMode } from "./tools.js";
+import type { ParsedCall } from "./tools.js";
 import type { ToolDef } from "./tools.js";
 
 export interface TurnParams {
@@ -34,6 +35,21 @@ function textFromParts(res: ServeMessageResponse): string {
   return (res.parts ?? []).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
 }
 
+// A `format: json_schema` turn does not answer with text: serve puts the constrained
+// object on `info.structured` ({name, arguments}) and the text parts stay empty, so
+// reading only the parts makes a required/named turn look like an empty message.
+function structuredCall(res: ServeMessageResponse, known: ReadonlySet<string>): ParsedCall | null {
+  const structured = res.info?.structured;
+  if (typeof structured !== "object" || structured === null || Array.isArray(structured)) return null;
+  const record = structured as Record<string, unknown>;
+  if (typeof record.name !== "string" || !known.has(record.name)) return null;
+  const args = record.arguments;
+  return {
+    name: record.name,
+    arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+  };
+}
+
 export async function runTurn(client: ServeClient, params: TurnParams): Promise<TurnResult> {
   const sessionId = await client.createSession();
   try {
@@ -52,11 +68,13 @@ export async function runTurn(client: ServeClient, params: TurnParams): Promise<
     const res = await client.postMessage(sessionId, payload);
     const text = textFromParts(res);
     const known = new Set(params.tools.map((t) => t.name));
-    const { content, calls } = parseToolCalls(text, known);
+    const parsed = parseToolCalls(text, known);
+    const structured = wantsJson ? structuredCall(res, known) : null;
+    const calls: ParsedCall[] = structured ? [structured] : parsed.calls;
     const toolCalls = calls.map((c, i) => ({ id: `call_${sessionId}_${i}`, name: c.name, arguments: c.arguments }));
     const finish = toolCalls.length > 0 ? "tool_calls" : res.info?.finish === "length" ? "length" : "stop";
     return {
-      content: toolCalls.length > 0 ? content : content || text,
+      content: toolCalls.length > 0 ? parsed.content : parsed.content || text,
       finish_reason: finish,
       usage: mapUsage(res.info?.tokens),
       sessionId,
@@ -77,6 +95,12 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
   const sessionId = await client.createSession();
   const controller = new AbortController();
   const emptyResponse: ServeMessageResponse = { info: {}, parts: [] };
+  const mode = toolChoiceMode(params.toolChoice);
+  // Spec §7.2: a required/named tool_choice asks for a call, not for prose, so the
+  // turn is constrained to the tool JSON schema and nothing is streamed as content —
+  // the call is emitted by the route once the turn has assembled it.
+  const wantsJson = params.tools.length > 0 && (mode === "required" || typeof mode === "object");
+  const fenceGuard = createFenceGuard();
   let assembled = "";
   let aborted = false;
 
@@ -99,6 +123,9 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
     };
     if (params.system) payload.system = params.system;
     if (params.variant) payload.variant = params.variant;
+    if (wantsJson) {
+      payload.format = { type: "json_schema", schema: buildToolJsonSchema(params.tools), retryCount: 2 };
+    }
 
     const stream = client.streamEvents(sessionId, controller.signal);
     const posted = client.postMessage(sessionId, payload);
@@ -111,12 +138,17 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
         const delta = textDelta(ev);
         if (delta !== null) {
           assembled += delta;
-          try {
-            params.onDelta(delta);
-          } catch {
-            aborted = true;
-            controller.abort();
-            break;
+          // The guard withholds anything that could become a ```tool_call fence, so a
+          // fence is never emitted as content and then re-emitted as tool_calls.
+          const safe = wantsJson ? "" : fenceGuard.push(delta);
+          if (safe.length > 0) {
+            try {
+              params.onDelta(safe);
+            } catch {
+              aborted = true;
+              controller.abort();
+              break;
+            }
           }
         } else {
           const full = partText(ev);
@@ -133,15 +165,29 @@ export async function runStreamingTurn(client: ServeClient, params: StreamingPar
       if (!selfInflicted) throw error;
     }
 
+    // Release the text the guard held back (trailing prose after a fence, or a
+    // fragment that never became one).
+    const tail = fenceGuard.flush();
+    if (!wantsJson && tail.length > 0 && !aborted) {
+      try {
+        params.onDelta(tail);
+      } catch {
+        aborted = true;
+        controller.abort();
+      }
+    }
+
     // On abort, do NOT await the in-flight message: it resolves only when the
     // (still running) generation completes, which would defeat the abort.
     const res = aborted ? emptyResponse : await posted.catch(() => emptyResponse);
     if (!assembled) assembled = textFromParts(res);
     const known = new Set(params.tools.map((t) => t.name));
-    const { content, calls } = parseToolCalls(assembled, known);
+    const parsed = parseToolCalls(assembled, known);
+    const structured = wantsJson ? structuredCall(res, known) : null;
+    const calls: ParsedCall[] = structured ? [structured] : parsed.calls;
     const toolCalls = calls.map((c, i) => ({ id: `call_${sessionId}_${i}`, name: c.name, arguments: c.arguments }));
     return {
-      content: toolCalls.length > 0 ? content : content || assembled,
+      content: toolCalls.length > 0 ? parsed.content : parsed.content || assembled,
       finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
       usage: mapUsage(res.info?.tokens),
       sessionId,

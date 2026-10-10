@@ -60,6 +60,30 @@ describe("composePrompt (P4)", () => {
     expect(prompt).toContain("Question: What?");
   });
 
+  it("renders assistant tool_calls so the replayed history shows the request", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "What is the weather in Paris?" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"location":"Paris"}' } },
+        ],
+      },
+      { role: "tool", content: '{"temperature":18}' },
+      { role: "user", content: "And in Lisbon?" },
+    ];
+
+    const prompt = composePrompt(messages);
+    const assistantLine = prompt.split("\n").find((line) => line.startsWith("Assistant:")) ?? "";
+
+    expect(assistantLine).not.toBe("Assistant:");
+    expect(assistantLine).toContain('{"tool_calls":');
+    expect(assistantLine).toContain("get_weather");
+    expect(assistantLine).toContain("call_1");
+    expect(prompt).toContain("Tool: {\"temperature\":18}");
+  });
+
   it("normalizes content values", () => {
     expect(normalizeContent(null)).toBe("");
     expect(normalizeContent(undefined)).toBe("");

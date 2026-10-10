@@ -1,14 +1,7 @@
+// The wrapper authenticates with one upstream credential (the host's opencode auth),
+// so there is no per-request credential to extract: an AuthContext only says whether
+// the caller presented one.
 export interface AuthContext {
   enabled: boolean;
   token: string | null;
-}
-
-export function extractAuth(header: string | string[] | undefined): AuthContext {
-  const raw = (Array.isArray(header) ? header[0] : header)?.trim() ?? "";
-  if (raw === "") return { enabled: false, token: null };
-
-  return {
-    enabled: true,
-    token: raw.replace(/^Bearer(?:\s+|$)/i, "").trim() || null,
-  };
 }

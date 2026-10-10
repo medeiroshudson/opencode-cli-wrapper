@@ -139,46 +139,24 @@ export function sseEvent(payload: unknown): string {
 
 export const SSE_DONE = "data: [DONE]\n\n";
 
-export function buildSseBody(result: TurnResult, model: string): string {
-  const id = `chatcmpl-${randomUUID()}`;
-  const created = Math.floor(Date.now() / 1000);
-  let body = sseEvent(buildChunk(id, model, created, { content: "" }, null));
-  if (result.toolCalls.length > 0) {
-    for (const [i, c] of result.toolCalls.entries()) {
-      body += sseEvent(
-        buildChunk(
-          id,
-          model,
-          created,
-          {
-            tool_calls: [
-              { index: i, id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } },
-            ],
-          },
-          null,
-        ),
-      );
-    }
-    body += sseEvent(buildChunk(id, model, created, {}, "tool_calls"));
-  } else {
-    body += sseEvent(buildChunk(id, model, created, { content: result.content }, null));
-    body += sseEvent(buildChunk(id, model, created, {}, result.finish_reason));
-  }
-  return body + SSE_DONE;
-}
-
 export function toOpenAIErrorBody(
   err: unknown,
   status = 500,
 ): { status: number; body: { error: OpenAIErrorBody } } {
   const message = err instanceof Error ? err.message : String(err);
   const detected = detectStatus(err);
-  const finalStatus = status === 500 && detected !== null ? detected : status;
+  // An upstream 4xx belongs to the caller (rate limit, rejected request) and must
+  // survive: the fallback describes the wrapper's own failure (502 = transport or
+  // startup), so letting it win flattened a 429 into a 502. An upstream 5xx keeps the
+  // fallback, which is how the wrapper reports an unhealthy daemon.
+  const finalStatus = detected !== null && detected >= 400 && detected < 500 ? detected : status;
 
   const error: OpenAIErrorBody =
     finalStatus === 400 || finalStatus === 422
       ? { message, type: "invalid_request_error", param: null }
-      : { message, type: "server_error", code: "opencode_error", param: null };
+      : finalStatus === 429
+        ? { message, type: "rate_limit_error", code: "rate_limit_exceeded", param: null }
+        : { message, type: "server_error", code: "opencode_error", param: null };
 
   return { status: finalStatus, body: { error } };
 }

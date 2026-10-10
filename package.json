@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "OpenAI-compatible HTTP API that proxies OpenCode free models through the official `opencode` CLI.",
+  "description": "OpenAI-compatible HTTP API that serves OpenCode models through a supervised `opencode serve` daemon.",
   "engines": {
     "node": ">=22"
   },

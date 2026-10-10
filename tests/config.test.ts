@@ -13,6 +13,7 @@ import {
   resolveModel,
   resolveOpencodeBin,
   resolveProxyEnv,
+  resolveServeEndpoint,
   visibleModels,
 } from "../src/config/index.js";
 
@@ -175,6 +176,34 @@ describe("serve env", () => {
 
   it("derives the base url from OPENCODE_PORT when OPENCODE_BASE is unset", () => {
     expect(getServeBaseUrl({ OPENCODE_PORT: "4200" })).toBe("http://127.0.0.1:4200");
+  });
+
+  it("derives the spawn port from a loopback OPENCODE_BASE", () => {
+    // OPENCODE_BASE is the documented way to point the wrapper at a serve daemon, so
+    // the daemon it supervises must listen on that URL's port.
+    expect(resolveServeEndpoint({ OPENCODE_BASE: "http://127.0.0.1:9999" })).toEqual({
+      url: "http://127.0.0.1:9999",
+      spawnPort: 9999,
+    });
+    expect(resolveServeEndpoint({ OPENCODE_BASE: "http://localhost:9999/" })).toEqual({
+      url: "http://localhost:9999",
+      spawnPort: 9999,
+    });
+  });
+
+  it("does not spawn for a non-loopback or portless OPENCODE_BASE", () => {
+    expect(resolveServeEndpoint({ OPENCODE_BASE: "http://serve.internal:9999" }).spawnPort).toBeNull();
+    expect(resolveServeEndpoint({ OPENCODE_BASE: "not a url" }).spawnPort).toBeNull();
+    // A loopback URL with no explicit port is used as-is: binding 80/443 is not implied.
+    expect(resolveServeEndpoint({ OPENCODE_BASE: "http://localhost" }).spawnPort).toBeNull();
+  });
+
+  it("spawns on OPENCODE_PORT when OPENCODE_BASE is unset", () => {
+    expect(resolveServeEndpoint({})).toEqual({ url: "http://127.0.0.1:4100", spawnPort: 4100 });
+    expect(resolveServeEndpoint({ OPENCODE_PORT: "4200" })).toEqual({
+      url: "http://127.0.0.1:4200",
+      spawnPort: 4200,
+    });
   });
 
   it("defaults the readiness timeout to 20000ms and reads the override", () => {

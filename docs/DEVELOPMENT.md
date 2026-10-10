@@ -54,8 +54,8 @@ npm run dev        # or: npm run build && npm start
 | Variable | Default | Description |
 |---|---|---|
 | `OPENCODE_BIN` | `opencode` | Path/command used to spawn `opencode serve` |
-| `OPENCODE_PORT` | `4100` | Loopback port the supervised daemon listens on |
-| `OPENCODE_BASE` | unset | Base URL of an existing serve API; overrides `OPENCODE_PORT` |
+| `OPENCODE_PORT` | `4100` | Port the wrapper spawns its own daemon on; ignored when `OPENCODE_BASE` names a port on a loopback host |
+| `OPENCODE_BASE` | unset | Base URL of the serve API. A loopback URL is supervised (and spawned if needed) on that URL's port; a non-loopback URL is used as-is and never spawned locally |
 | `OPENCODE_TIMEOUT_MS` | `120000` | Per-request timeout for a serve HTTP call |
 | `OPENCODE_SERVE_READY_TIMEOUT_MS` | `20000` | How long to wait for the daemon to become healthy |
 | `OPENCODE_MODELS_TTL_MS` | `300000` | How long to cache the discovered model catalog |
@@ -209,5 +209,6 @@ src/
 ```
 
 On the first request, `getServeSupervisor().ensureReady()` starts a local `opencode serve` daemon
-(or reuses the one at `OPENCODE_BASE`) and waits for it to become healthy before the catalog is
-fetched; the `onClose` hook stops it when the server shuts down.
+(unless `OPENCODE_BASE` points off-host, in which case that server is used as-is and never
+spawned) and waits for it to become healthy before the catalog is fetched; the `onClose` hook
+stops a daemon the wrapper spawned when the server shuts down.

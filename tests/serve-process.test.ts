@@ -5,7 +5,7 @@ import { buildChildEnv } from "../src/config/index.js";
 function deps(overrides: Record<string, unknown> = {}) {
   return {
     baseUrl: "http://127.0.0.1:4100",
-    port: 4100,
+    spawnPort: 4100,
     bin: "opencode",
     readinessTimeoutMs: 1000,
     isHealthy: vi.fn(async () => true),
@@ -35,6 +35,23 @@ describe("ServeSupervisor", () => {
     const sup = new ServeSupervisor(d);
     await sup.ensureReady();
     expect(d.spawnServe).toHaveBeenCalledWith("opencode", 4100);
+  });
+
+  it("refuses to spawn when the endpoint is not local", async () => {
+    const d = deps({ baseUrl: "http://serve.internal:9999", spawnPort: null, isHealthy: vi.fn(async () => false) });
+    const sup = new ServeSupervisor(d);
+
+    await expect(sup.ensureReady()).rejects.toThrow(/OPENCODE_BASE points off-host/);
+    expect(d.spawnServe).not.toHaveBeenCalled();
+  });
+
+  it("uses an unhealthy remote endpoint's daemon without spawning", async () => {
+    // Healthy remote endpoint: nothing to do, and still no local child.
+    const d = deps({ baseUrl: "http://serve.internal:9999", spawnPort: null });
+    const sup = new ServeSupervisor(d);
+
+    await sup.ensureReady();
+    expect(d.spawnServe).not.toHaveBeenCalled();
   });
 
   it("throws ServeStartupError when the daemon never becomes healthy", async () => {
@@ -111,5 +128,37 @@ describe("defaultServeDeps", () => {
     expect(spawnedEnv?.HTTPS_PROXY).toBe("http://proxy.corp:8080");
     expect(spawnedEnv?.NO_PROXY).toBe("localhost,127.0.0.1,::1");
     expect(spawnedEnv?.PATH).toBe("/bin");
+  });
+
+  it("spawns on the port named by a loopback OPENCODE_BASE", () => {
+    const client = { health: vi.fn(async () => true) };
+
+    const d = defaultServeDeps(client as never, vi.fn() as never, { OPENCODE_BASE: "http://127.0.0.1:9999" });
+
+    // Without this, the daemon starts on OPENCODE_PORT's default 4100 while readiness
+    // and every request poll :9999.
+    expect(d.baseUrl).toBe("http://127.0.0.1:9999");
+    expect(d.spawnPort).toBe(9999);
+  });
+
+  it("keeps the default port when OPENCODE_BASE is unset", () => {
+    const client = { health: vi.fn(async () => true) };
+
+    const d = defaultServeDeps(client as never, vi.fn() as never, { OPENCODE_PORT: "4200" });
+
+    expect(d.baseUrl).toBe("http://127.0.0.1:4200");
+    expect(d.spawnPort).toBe(4200);
+  });
+
+  it("never spawns for a non-loopback OPENCODE_BASE", () => {
+    const client = { health: vi.fn(async () => true) };
+
+    const d = defaultServeDeps(client as never, vi.fn() as never, {
+      OPENCODE_BASE: "http://serve.internal:9999",
+      OPENCODE_PORT: "4200",
+    });
+
+    expect(d.baseUrl).toBe("http://serve.internal:9999");
+    expect(d.spawnPort).toBeNull();
   });
 });

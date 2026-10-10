@@ -10,6 +10,32 @@ const catalogFixture = [
 ];
 const inboundHeaders = { authorization: "Bearer test-inbound-key" };
 
+const WEATHER_TOOL = {
+  type: "function",
+  function: {
+    name: "get_weather",
+    description: "Get the current weather for a location.",
+    parameters: { type: "object", properties: { location: { type: "string" } }, required: ["location"] },
+  },
+};
+
+interface SseChunk {
+  choices: Array<{ delta: { content?: string; tool_calls?: Array<{ function: { name: string } }> }; finish_reason: string | null }>;
+}
+
+function sseChunks(body: string): SseChunk[] {
+  return body
+    .split("\n\n")
+    .filter((block) => block.startsWith("data: ") && !block.includes("[DONE]"))
+    .map((block) => JSON.parse(block.slice("data: ".length)) as SseChunk);
+}
+
+function contentDeltas(body: string): string[] {
+  return sseChunks(body)
+    .map((chunk) => chunk.choices[0]?.delta.content)
+    .filter((value): value is string => typeof value === "string");
+}
+
 const { getCatalogMock, useRealCatalog, ensureReadyMock, callLog } = vi.hoisted(() => ({
   getCatalogMock: vi.fn(),
   useRealCatalog: { value: false },
@@ -333,6 +359,366 @@ describe("Routes (P6/P7)", () => {
     res.emitClose();
 
     expect(controller.signal.aborted).toBe(false);
+  });
+
+  it("emits tool_calls (and no fence content) when streaming a required tool_choice", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    // The model honours `format: json_schema` and the fence arrives split across deltas.
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: '```tool_call\n{"name":"get_weather",' } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: '"arguments":{"location":"Paris"}}\n```' } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+    const postSpy = vi.spyOn(client, "postMessage");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        stream: true,
+        tools: [WEATHER_TOOL],
+        tool_choice: "required",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // A required turn is constrained by the serve JSON schema, not by the fence prompt.
+    expect(postSpy.mock.calls[0]?.[1]).toMatchObject({ format: { type: "json_schema", retryCount: 2 } });
+    const chunks = sseChunks(res.body);
+    expect(chunks.some((chunk) => chunk.choices[0]?.delta.tool_calls?.[0]?.function.name === "get_weather")).toBe(true);
+    expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe("tool_calls");
+    // The fence must never be forwarded as content as well.
+    expect(contentDeltas(res.body).join("")).not.toContain("tool_call");
+    expect(contentDeltas(res.body)).toEqual([]);
+    expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
+  it("streams plain content and no tool_calls for tool_choice auto", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "he" } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: "llo" } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        tools: [WEATHER_TOOL],
+        tool_choice: "auto",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(contentDeltas(res.body)).toEqual(["he", "llo"]);
+    expect(res.body).not.toContain("tool_calls");
+  });
+
+  it("holds a fenced tool_call back from streamed content in auto mode", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "Let me check.\n``" } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: "`tool_call\n" } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: '{"name":"get_weather","arguments":{"location":"Paris"}}' } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: "\n``" } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: "`" } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        stream: true,
+        tools: [WEATHER_TOOL],
+        tool_choice: "auto",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const streamed = contentDeltas(res.body).join("");
+    expect(streamed).toBe("Let me check.\n");
+    expect(streamed).not.toContain("tool_call");
+    const chunks = sseChunks(res.body);
+    expect(chunks.some((chunk) => chunk.choices[0]?.delta.tool_calls?.[0]?.function.name === "get_weather")).toBe(true);
+    expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe("tool_calls");
+  });
+
+  it("returns tool_calls with finish_reason tool_calls for a required non-stream turn", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "stop" },
+      parts: [{ type: "text", text: '{"name":"get_weather","arguments":{"location":"Paris"}}' }],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        tools: [WEATHER_TOOL],
+        tool_choice: "required",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const choice = res.json().choices[0];
+    expect(choice.message.tool_calls).toEqual([
+      { id: expect.stringContaining("call_"), type: "function", function: { name: "get_weather", arguments: '{"location":"Paris"}' } },
+    ]);
+    expect(choice.finish_reason).toBe("tool_calls");
+    expect(choice.message.content).toBeNull();
+  });
+
+  it("reads the json_schema call from info.structured, which carries no text part", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    // The real serve shape for a schema-constrained turn: finish/structured on info,
+    // empty parts — reading only parts makes this look like an empty message.
+    vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "tool-calls", structured: { name: "get_weather", arguments: '{"location": "Paris"}' } },
+      parts: [{ type: "step-start" }],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        tools: [WEATHER_TOOL],
+        tool_choice: "required",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const choice = res.json().choices[0];
+    expect(choice.message.tool_calls).toEqual([
+      { id: expect.stringContaining("call_"), type: "function", function: { name: "get_weather", arguments: '{"location": "Paris"}' } },
+    ]);
+    expect(choice.finish_reason).toBe("tool_calls");
+  });
+
+  it("reads the structured call for a streaming required turn that streams no text", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "session.idle", properties: {} };
+    } as never;
+    vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "tool-calls", structured: { name: "get_weather", arguments: { location: "Paris" } } },
+      parts: [],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        stream: true,
+        tools: [WEATHER_TOOL],
+        tool_choice: "required",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const chunks = sseChunks(res.body);
+    expect(chunks.some((chunk) => chunk.choices[0]?.delta.tool_calls?.[0]?.function.name === "get_weather")).toBe(true);
+    expect(chunks.at(-1)?.choices[0]?.finish_reason).toBe("tool_calls");
+    expect(contentDeltas(res.body)).toEqual([]);
+  });
+
+  it("keeps finish_reason stop and no tool_calls for an auto turn answered with plain text", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "stop" },
+      parts: [{ type: "text", text: "It is sunny in Paris." }],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        tools: [WEATHER_TOOL],
+        tool_choice: "auto",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const choice = res.json().choices[0];
+    expect(choice.message.tool_calls).toBeUndefined();
+    expect(choice.finish_reason).toBe("stop");
+    expect(choice.message.content).toBe("It is sunny in Paris.");
+  });
+
+  it("never reports tool_calls when a required turn ignores the schema", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "stop" },
+      parts: [{ type: "text", text: "I cannot call tools, but it is sunny in Paris." }],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [{ role: "user", content: "weather in Paris?" }],
+        tools: [WEATHER_TOOL],
+        tool_choice: "required",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const choice = res.json().choices[0];
+    // An empty tool_calls with a tool_calls finish would make clients wait for a call.
+    expect(choice.message.tool_calls).toBeUndefined();
+    expect(choice.finish_reason).not.toBe("tool_calls");
+    expect(choice.finish_reason).toBe("stop");
+  });
+
+  it("keeps concurrent requests in distinct sessions without cross-contamination", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    const sessions: string[] = [];
+    const createSpy = vi.spyOn(client, "createSession").mockImplementation(async () => {
+      const id = `ses_${sessions.length + 1}`;
+      sessions.push(id);
+      return id;
+    });
+    vi.spyOn(client, "postMessage").mockImplementation(async (sessionId: string) => {
+      // The first request finishes last, so a shared turn state would swap the replies.
+      await new Promise((resolve) => setTimeout(resolve, sessionId === "ses_1" ? 20 : 1));
+      return { info: { finish: "stop" }, parts: [{ type: "text", text: `reply-${sessionId}` }] };
+    });
+
+    const payloadFor = (content: string) => ({
+      method: "POST" as const,
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content }] },
+    });
+    const [first, second] = await Promise.all([app.inject(payloadFor("one")), app.inject(payloadFor("two"))]);
+
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    expect(new Set(sessions).size).toBe(2);
+    expect(first.headers["x-opencode-session-id"]).toBe("ses_1");
+    expect(second.headers["x-opencode-session-id"]).toBe("ses_2");
+    expect(first.json().choices[0].message.content).toBe("reply-ses_1");
+    expect(second.json().choices[0].message.content).toBe("reply-ses_2");
+  });
+
+  it("accepts an assistant turn with null content and tool_calls in the history", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    const postSpy = vi.spyOn(client, "postMessage");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [
+          { role: "user", content: "weather in Paris?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"location":"Paris"}' } },
+            ],
+          },
+          { role: "tool", content: '{"temperature":18}' },
+          { role: "user", content: "thanks" },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const prompt = (postSpy.mock.calls[0]?.[1] as { parts: Array<{ text: string }> }).parts[0]?.text ?? "";
+    expect(prompt).toContain('Assistant: {"tool_calls":');
+    expect(prompt).toContain("get_weather");
+    expect(prompt).toContain('Tool: {"temperature":18}');
+  });
+
+  it("maps an upstream 429 to a 429 rate-limit error", async () => {
+    const { ServeHttpError } = await import("../src/lib/serve/client.js");
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    vi.spyOn(getServeClient(), "postMessage").mockRejectedValueOnce(new ServeHttpError(429, "rate limited"));
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.statusCode).toBe(429);
+    expect(res.json()).toEqual({
+      error: { message: "serve responded 429", type: "rate_limit_error", code: "rate_limit_exceeded", param: null },
+    });
+  });
+
+  it("maps an upstream 500 to a 502", async () => {
+    const { ServeHttpError } = await import("../src/lib/serve/client.js");
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    vi.spyOn(getServeClient(), "postMessage").mockRejectedValueOnce(new ServeHttpError(500, "boom"));
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toMatchObject({ error: { type: "server_error", code: "opencode_error" } });
+  });
+
+  it("ends a failed stream with [DONE] instead of truncating it", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "par" } };
+      throw new Error("event stream dropped");
+    } as never;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }], stream: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('"error"');
+    expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
   });
 
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;

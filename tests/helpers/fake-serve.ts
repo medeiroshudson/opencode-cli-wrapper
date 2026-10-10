@@ -5,6 +5,8 @@ export interface FakeServeOptions {
   readonly text?: string;
   readonly deltas?: readonly string[];
   readonly failMessage?: number;
+  /** Open the SSE stream, send one non-terminal event, then never end it. */
+  readonly hangEventStream?: boolean;
 }
 
 export interface FakeServe {
@@ -52,6 +54,11 @@ export async function startFakeServe(opts: FakeServeOptions = {}): Promise<FakeS
     }
     if (url.startsWith("/api/session/") && url.endsWith("/event")) {
       res.writeHead(200, { "content-type": "text/event-stream" });
+      if (opts.hangEventStream) {
+        res.flushHeaders();
+        res.write(`data: ${JSON.stringify({ type: "session.created", properties: {} })}\n\n`);
+        return;
+      }
       for (const d of deltas) {
         res.write(`data: ${JSON.stringify({ type: "message.part.delta", properties: { field: "text", delta: d } })}\n\n`);
       }
@@ -71,6 +78,11 @@ export async function startFakeServe(opts: FakeServeOptions = {}): Promise<FakeS
   return {
     url: `http://127.0.0.1:${port}`,
     calls,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        // A hung SSE response is never idle, so server.close() alone would wait forever.
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
   };
 }

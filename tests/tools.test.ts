@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildToolJsonSchema, extractToolDefs, parseToolCalls, toolChoiceMode, toolInstruction } from "../src/lib/opencode/tools.js";
+import { buildToolJsonSchema, createFenceGuard, extractToolDefs, parseToolCalls, toolChoiceMode, toolInstruction } from "../src/lib/opencode/tools.js";
 
 const body = {
   tools: [
@@ -41,6 +41,50 @@ describe("buildToolJsonSchema", () => {
   it("produces a oneOf of call objects", () => {
     const schema = buildToolJsonSchema(extractToolDefs(body)) as { oneOf: Array<{ properties: { name: { const: string } } }> };
     expect(schema.oneOf[0]?.properties.name.const).toBe("get_weather");
+  });
+});
+
+describe("createFenceGuard", () => {
+  const feed = (chunks: string[]): string => {
+    const guard = createFenceGuard();
+    return chunks.map((chunk) => guard.push(chunk)).join("") + guard.flush();
+  };
+
+  it("passes plain text through unchanged", () => {
+    expect(feed(["Hel", "lo ", "world"])).toBe("Hello world");
+  });
+
+  it("never emits a fence split across deltas", () => {
+    const emitted = feed([
+      "Let me check.\n",
+      "``",
+      "`tool_call\n",
+      '{"name":"get_weather","arguments":{"city":"Paris"}}',
+      "\n``",
+      "`",
+      "\nDone.",
+    ]);
+
+    expect(emitted).not.toContain("tool_call");
+    expect(emitted).toBe("Let me check.\n\nDone.");
+  });
+
+  it("keeps a partial fence start back until it is resolved", () => {
+    const guard = createFenceGuard();
+    expect(guard.push("text ```")).toBe("text ");
+    expect(guard.push("tool")).toBe("");
+    expect(guard.push("_call {")).toBe("");
+    expect(guard.push('"name":"a"}```')).toBe("");
+    expect(guard.flush()).toBe("");
+  });
+
+  it("releases a normal code block once it is known not to be a tool call", () => {
+    const guard = createFenceGuard();
+    expect(guard.push("```py")).toBe("```py");
+  });
+
+  it("drops an unterminated fence instead of leaking it", () => {
+    expect(feed(["```tool_call {\"name\":\"a\""])).toBe("");
   });
 });
 
