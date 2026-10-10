@@ -53,4 +53,33 @@ describe("ServeSupervisor", () => {
     await sup.shutdown();
     expect(kill).toHaveBeenCalled();
   });
+
+  it("kills the spawned child when readiness times out", async () => {
+    const kill = vi.fn();
+    const d = deps({
+      isHealthy: vi.fn(async () => false),
+      spawnServe: vi.fn(() => ({ kill })),
+      readinessTimeoutMs: 150,
+    });
+    const sup = new ServeSupervisor(d);
+    await expect(sup.ensureReady()).rejects.toBeInstanceOf(ServeStartupError);
+    expect(d.spawnServe).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalled();
+  });
+
+  it("does not double-spawn on concurrent ensureReady calls", async () => {
+    let healthy = false;
+    const spawnServe = vi.fn(() => ({ kill: vi.fn() }));
+    const d = deps({
+      isHealthy: vi.fn(async () => healthy),
+      spawnServe,
+      readinessTimeoutMs: 2000,
+    });
+    const sup = new ServeSupervisor(d);
+    const first = sup.ensureReady();
+    const second = sup.ensureReady();
+    healthy = true;
+    await Promise.all([first, second]);
+    expect(spawnServe).toHaveBeenCalledTimes(1);
+  });
 });

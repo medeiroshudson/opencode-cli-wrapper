@@ -27,6 +27,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 export class ServeSupervisor {
   private child: SpawnedChild | null = null;
+  private readiness: Promise<void> | null = null;
 
   constructor(private readonly deps: ServeProcessDeps) {}
 
@@ -34,7 +35,18 @@ export class ServeSupervisor {
     return this.deps.baseUrl;
   }
 
-  async ensureReady(): Promise<void> {
+  ensureReady(): Promise<void> {
+    // Memoize the in-flight attempt so concurrent cold-start callers share a
+    // single health check and spawn; clear it once the attempt settles.
+    if (!this.readiness) {
+      this.readiness = this.start().finally(() => {
+        this.readiness = null;
+      });
+    }
+    return this.readiness;
+  }
+
+  private async start(): Promise<void> {
     if (await this.deps.isHealthy()) return;
     this.child = this.deps.spawnServe(this.deps.bin, this.deps.port);
     const deadline = Date.now() + this.deps.readinessTimeoutMs;
@@ -42,10 +54,12 @@ export class ServeSupervisor {
       if (await this.deps.isHealthy()) return;
       await sleep(250);
     }
+    // The daemon never came up: don't leak it holding the port.
+    this.killChild();
     throw new ServeStartupError(`opencode serve did not become healthy in ${this.deps.readinessTimeoutMs}ms`);
   }
 
-  async shutdown(): Promise<void> {
+  private killChild(): void {
     if (this.child) {
       try {
         this.child.kill();
@@ -54,6 +68,10 @@ export class ServeSupervisor {
       }
       this.child = null;
     }
+  }
+
+  async shutdown(): Promise<void> {
+    this.killChild();
   }
 }
 
@@ -65,6 +83,8 @@ export function defaultServeDeps(client: ServeClient): ServeProcessDeps {
     readinessTimeoutMs: getServeReadinessTimeoutMs(),
     isHealthy: () => client.health(),
     spawnServe: (bin, port) =>
-      spawn(bin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], { stdio: "inherit" }),
+      spawn(bin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], {
+        stdio: ["ignore", "inherit", "inherit"],
+      }),
   };
 }
