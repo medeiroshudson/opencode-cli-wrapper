@@ -1,26 +1,23 @@
 # OpenCode OpenAI-Compatible API
 
-An OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`, SSE) that proxies models
-reported by the OpenCode CLI. Each chat request is executed by spawning:
+An OpenAI-compatible HTTP API (`/v1/models`, `/v1/chat/completions`, SSE) that proxies the model
+catalog and chat turns served by a supervised `opencode serve` daemon. Each chat request opens a
+session on that daemon and sends the whole conversation as a single prompt ("prompt-embed").
 
-```
-opencode run --format json -m <provider/model>
-```
+> Design rationale and spike evidence: [`docs/plan.md`](plan.md).
+> Ordered build plan: [`.omo/plans/opencode-openai-api.md`](../.omo/plans/opencode-openai-api.md).
 
-with the whole conversation injected as a single prompt ("prompt-embed").
+## Why the serve API
 
-> Design rationale and spike evidence: [`docs/plan.md`](docs/plan.md).
-> Ordered build plan: [`.omo/plans/opencode-openai-api.md`](.omo/plans/opencode-openai-api.md).
-
-## Why the CLI (and not the OpenCode HTTP endpoint)
-
-The OpenCode HTTP endpoint only unlocks free models for OpenCode Herency users. The
-**CLI** runs open-weight free models for anyone, so the wrapper shells out to it.
+Earlier revisions shelled out to `opencode run` per request. The wrapper now drives a single
+supervised `opencode serve` daemon instead: it forwards real incremental text deltas, keeps one warm
+process instead of paying a spawn cost per request, and centralizes upstream authentication in the
+daemon.
 
 ## Requirements
 
 - Node.js >= 22 (Docker image uses `node:22-alpine`)
-- The `opencode` CLI on `PATH` (pinned to `1.18.31` in Docker)
+- The `opencode` CLI on `PATH` (used to spawn `opencode serve`; pinned to `1.18.31` in Docker)
 
 ## Quick start (Docker)
 
@@ -42,7 +39,7 @@ free models:
 
 The service runs as `root` so it can write those named volumes. This assumes you have run
 `opencode` on the host at least once so the config and `auth.json` exist; otherwise
-`/v1/models`, validation and error mapping still work but `opencode run` fails upstream.
+`/v1/models`, validation and error mapping still work but `opencode serve` fails upstream.
 
 ## Quick start (local)
 
@@ -56,10 +53,12 @@ npm run dev        # or: npm run build && npm start
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENCODE_BIN` | `opencode` | Path/command of the OpenCode binary |
-| `OPENCODE_TIMEOUT_MS` | `120000` | Per-request timeout for a single `opencode run` |
+| `OPENCODE_BIN` | `opencode` | Path/command used to spawn `opencode serve` |
+| `OPENCODE_PORT` | `4100` | Loopback port the supervised daemon listens on |
+| `OPENCODE_BASE` | unset | Base URL of an existing serve API; overrides `OPENCODE_PORT` |
+| `OPENCODE_TIMEOUT_MS` | `120000` | Per-request timeout for a serve HTTP call |
+| `OPENCODE_SERVE_READY_TIMEOUT_MS` | `20000` | How long to wait for the daemon to become healthy |
 | `OPENCODE_MODELS_TTL_MS` | `300000` | How long to cache the discovered model catalog |
-| `OPENCODE_MODELS_TIMEOUT_MS` | `30000` | Timeout for the `opencode models` catalog command |
 | `PORT` | `3000` | HTTP port |
 | `HOST` | `0.0.0.0` | HTTP bind address |
 
@@ -67,26 +66,27 @@ npm run dev        # or: npm run build && npm start
 
 ### List models
 
-`GET /v1/models` runs `opencode models` and discovers the available catalog. Without an
-`Authorization` header, the API returns only model ids ending in `-free`. When the request
-includes an `Authorization` header, it returns all models reported by the CLI.
+`GET /v1/models` returns the model catalog discovered from the serve API and cached by TTL. Every
+request requires `Authorization: Bearer <API_KEY>`; with a single upstream credential the whole
+catalog is always visible.
 
 ```bash
-curl -s http://localhost:3000/v1/models
+curl -s http://localhost:3000/v1/models \
+  -H 'Authorization: Bearer your-api-key'
 ```
 
 ```json
 { "object": "list", "data": [{ "id": "mimo-v2.6-flash-free", "object": "model", "owned_by": "opencode", "context_length": 200000, "max_model_len": 200000 }] }
 ```
 
-When published in `opencode models --verbose`, each model also includes `max_output_tokens` and
+When published by the serve catalog API, each model also includes `max_output_tokens` and
 `max_input_tokens`; unavailable limit fields are omitted. `max_model_len` mirrors the model's
 context limit for vLLM-compatible metadata discovery.
 
 ### Model metadata discovery plugin
 
-`GET /models.dev.json` returns the full catalog, without auth filtering, as a flat models.dev-schema
-object keyed by bare model id. For
+`GET /models.dev.json` returns the full catalog as a flat models.dev-schema object keyed by bare
+model id. Like every wrapper endpoint it requires `Authorization: Bearer <API_KEY>`. For
 [`opencode-models-discovery`](https://github.com/yuhp/opencode-models-discovery), configure the
 vLLM enricher to read `max_model_len` from `/v1/models` (no separate metadata URL):
 
@@ -116,15 +116,6 @@ To use its models.dev enricher instead, point it at the separate endpoint:
 }
 ```
 
-For authenticated requests, the API passes the header value to the spawned `opencode` process
-as `OPENCODE_API_KEY`. It strips a leading `Bearer ` prefix and adds the key without changing
-the host's `auth.json`.
-
-```bash
-curl -s http://localhost:3000/v1/models \
-  -H 'Authorization: Bearer your-api-key'
-```
-
 ### Chat completion
 
 ```bash
@@ -152,14 +143,15 @@ curl -sN http://localhost:3000/v1/chat/completions \
   -d '{"model":"mimo-v2.6-flash-free","messages":[{"role":"user","content":"Olá"}],"stream":true}'
 ```
 
-Returns `text/event-stream` (`chat.completion.chunk` frames) terminated by `data: [DONE]`.
+Returns `text/event-stream` (`chat.completion.chunk` frames carrying incremental text deltas)
+terminated by `data: [DONE]`.
 
 ### OpenAI SDK
 
 ```ts
 import OpenAI from "openai";
 
-const client = new OpenAI({ baseURL: "http://localhost:3000/v1", apiKey: "not-needed" });
+const client = new OpenAI({ baseURL: "http://localhost:3000/v1", apiKey: process.env.API_KEY! });
 
 const completion = await client.chat.completions.create({
   model: "mimo-v2.6-flash-free",
@@ -177,18 +169,15 @@ const completion = await client.chat.completions.create({
 
 ## Known limitations (by design)
 
-- **No token-level streaming.** `opencode run --format json` emits a single `text` event per
-  step, so SSE delivers the whole step as one chunk.
-- **No cross-turn recall.** OpenCode sessions do not remember previous turns, so the entire
-  `messages[]` history is embedded into one prompt on every request.
-- **`temperature` / `max_tokens` are soft-anchored** into the prompt (the CLI exposes no such
-  flags), so they act as hints, not guarantees.
-- **Model availability may change.** The API discovers models from `opencode models` and limits
-  unauthenticated requests to ids ending in `-free`.
-- **No authentication.** Bind to a trusted network or add your own auth proxy.
+- **No cross-turn recall.** Each turn opens a fresh OpenCode session, so the entire `messages[]`
+  history is embedded into one prompt on every request.
+- **`temperature` / `max_tokens` are soft-anchored** into the prompt (the serve turn carries no
+  sampling flags), so they act as hints, not guarantees.
+- **Model availability may change.** The API discovers models from the serve catalog; what is
+  available depends on the host's OpenCode providers and credentials.
 - **Docker needs the host's OpenCode credentials.** `docker compose` mounts your host OpenCode
   config/cache/auth (read-only) and keeps writable state in named volumes. If the host has never
-  run `opencode`, `opencode run` fails upstream while `/v1/models`, validation and error mapping
+  run `opencode`, `opencode serve` fails upstream while `/v1/models`, validation and error mapping
   still work.
 
 ## Development
@@ -204,11 +193,21 @@ npm run build       # emits dist/
 
 ```
 src/
-  config/index.ts              # binary resolution, catalog filtering, listModels/resolveModel/modelsDevMetadata
-  lib/opencode/runner.ts       # spawn + NDJSON event reducer -> RunResult
+  config/index.ts              # env resolution, catalog visibility/resolution, listModels/resolveModel/modelsDevMetadata
   lib/opencode/compose.ts      # messages[] -> single prompt (prompt-embed)
+  lib/opencode/turn.ts         # one chat turn against the serve API (session per turn)
+  lib/opencode/models.ts       # catalog fetched from the serve API, cached by TTL
+  lib/opencode/tools.ts        # tool-call extraction + JSON schema
+  lib/serve/client.ts          # HTTP client for `opencode serve` (catalog, sessions, SSE)
+  lib/serve/events.ts          # serve SSE event -> text delta / finish parsing
+  lib/serve/process.ts         # supervises the daemon: spawn, wait for health, kill on shutdown
+  lib/serve/runtime.ts         # process-wide client + supervisor singletons
   lib/openai-format/index.ts   # buildCompletion / SSE / toOpenAIErrorBody
   routes/models.ts             # GET /v1/models and GET /models.dev.json
   routes/chat.ts               # POST /v1/chat/completions
-  server.ts                    # Fastify wiring + global error mapping
+  server.ts                    # Fastify wiring, Bearer auth, error mapping, onClose shutdown hook
 ```
+
+On the first request, `getServeSupervisor().ensureReady()` starts a local `opencode serve` daemon
+(or reuses the one at `OPENCODE_BASE`) and waits for it to become healthy before the catalog is
+fetched; the `onClose` hook stops it when the server shuts down.

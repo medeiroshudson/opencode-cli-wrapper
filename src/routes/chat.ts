@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { ModelNotFoundError, resolveModel } from "../config/index.js";
 import type { ChatMessage } from "../lib/opencode/compose.js";
 import { applyAnchors, composePrompt } from "../lib/opencode/compose.js";
-import { extractAuth } from "../lib/opencode/auth.js";
 import { CatalogError, getCatalog } from "../lib/opencode/models.js";
 import type { CatalogEntry } from "../lib/opencode/models.js";
 import { extractToolDefs, toolInstruction } from "../lib/opencode/tools.js";
@@ -80,7 +79,9 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     { schema: chatBodySchema },
     async (request, reply) => {
       const body = request.body;
-      const auth = extractAuth(request.headers["x-opencode-key"]);
+      // The wrapper has a single upstream credential (the host's opencode auth), so
+      // the whole catalog is visible — there is no per-request credential to read.
+      const auth = { enabled: true, token: null };
 
       // The daemon must be up before the catalog fetch: getServeClient() only
       // constructs a client, so a cold start would otherwise hit a dead port.

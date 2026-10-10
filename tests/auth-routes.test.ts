@@ -86,9 +86,7 @@ describe("Global route authentication", () => {
     ["unsupported scheme", "Basic test-inbound-key"],
     ["incorrect", "Bearer wrong-key"],
   ])("rejects %s credentials before route work", async (_condition, header) => {
-    const headers = header === undefined
-      ? { "x-opencode-key": "upstream-key" }
-      : { authorization: header, "x-opencode-key": "upstream-key" };
+    const headers = header === undefined ? {} : { authorization: header };
     const response = await app.inject({ method: "GET", url: "/v1/models", headers });
 
     expect(response.statusCode).toBe(401);
@@ -111,31 +109,7 @@ describe("Global route authentication", () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it("does not let x-opencode-key authenticate, and routes the chat turn through the serve client", async () => {
-    const unauthorized = await app.inject({
-      method: "POST",
-      url: "/v1/chat/completions",
-      headers: { "x-opencode-key": "upstream-key" },
-      payload: chatPayload,
-    });
-    expect(unauthorized.statusCode).toBe(401);
-    expect(getCatalogMock).not.toHaveBeenCalled();
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/chat/completions",
-      headers: { ...authorization, "x-opencode-key": "upstream-key" },
-      payload: chatPayload,
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(postMessageMock).toHaveBeenCalledWith(
-      "ses_test",
-      expect.objectContaining({ model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" } }),
-    );
-  });
-
-  it("serves a free model through the serve client when x-opencode-key is absent", async () => {
+  it("routes the chat turn through the serve client with the resolved model and no upstream credential", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
@@ -144,6 +118,11 @@ describe("Global route authentication", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(postMessageMock.mock.calls[0]?.[1]).not.toHaveProperty("OPENCODE_API_KEY");
+    // runTurn assembles the payload from the conversation alone: the resolved model and
+    // the prompt. There is no per-request upstream credential field.
+    expect(postMessageMock).toHaveBeenCalledWith("ses_test", {
+      model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+      parts: [{ type: "text", text: expect.any(String) }],
+    });
   });
 });

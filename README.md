@@ -15,7 +15,7 @@ Run the API in a container and keep using the models and workflows you already h
 ## Features
 
 - OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions` endpoints
-- Server-sent events (SSE) for step-by-step streaming
+- Server-sent events (SSE) streaming of model output
 - Works with existing OpenAI SDKs and compatible tools
 - Free models available out of the box
 - Container-first setup with a published GHCR image
@@ -50,9 +50,9 @@ still works, but model requests fail upstream.
 ## Usage
 
 Every request to the wrapper must include `Authorization: Bearer ${API_KEY}`, where `API_KEY` is
-the local wrapper key you configured above. The separate `x-opencode-key` header is optional and
-passes an upstream OpenCode credential for a chat request; it never authenticates access to the
-wrapper. This includes `/health` and `/models.dev.json`.
+the local wrapper key you configured above. Model requests run through a supervised `opencode serve`
+daemon that authenticates with the host's OpenCode credentials, so there is a single upstream
+credential and no per-request OpenCode key header. This includes `/health` and `/models.dev.json`.
 
 List available models:
 
@@ -75,8 +75,8 @@ curl http://localhost:3000/v1/models \
 }
 ```
 
-Context metadata comes from `opencode models --verbose`. Each model includes `context_length` and
-the vLLM-compatible `max_model_len` (both represent the context limit),
+Context metadata comes from the `opencode serve` catalog API. Each model includes `context_length`
+and the vLLM-compatible `max_model_len` (both represent the context limit),
 `max_output_tokens`, and (when published) `max_input_tokens`; unavailable fields are omitted.
 
 ### Metadata for opencode-models-discovery
@@ -135,8 +135,8 @@ curl http://localhost:3000/v1/chat/completions \
 ```
 
 Use the OpenAI SDK by pointing its `baseURL` at the local API and setting `apiKey` to the wrapper
-key. The SDK sends this as the ingress Bearer credential. To pass a separate upstream OpenCode
-credential for chat requests, add `x-opencode-key` with `defaultHeaders`:
+key; the SDK sends it as the ingress Bearer credential. Upstream OpenCode authentication is handled
+by the supervised daemon, so no extra header is needed.
 
 ```ts
 import OpenAI from "openai";
@@ -144,10 +144,6 @@ import OpenAI from "openai";
 const client = new OpenAI({
   baseURL: "http://localhost:3000/v1",
   apiKey: process.env.API_KEY!,
-  // Add this only when sending a separate upstream OpenCode credential.
-  ...(process.env.OPENCODE_API_KEY && {
-    defaultHeaders: { "x-opencode-key": process.env.OPENCODE_API_KEY },
-  }),
 });
 
 const response = await client.chat.completions.create({
@@ -162,35 +158,35 @@ console.log(response.choices[0]?.message.content);
 
 `API_KEY` is the required wrapper ingress credential. Set it to a locally generated secret in
 your ignored `.env` file; requests must send it as `Authorization: Bearer <API_KEY>`. Keep this
-value private. The optional `x-opencode-key` request header carries a separate upstream OpenCode
-credential for chat requests. It does not replace or authenticate the wrapper Bearer key. The
-OpenAI SDK's `apiKey` configures the wrapper Bearer credential; use `defaultHeaders` separately
-if you want to send `x-opencode-key`.
+value private. Model requests run through a supervised `opencode serve` daemon that authenticates
+with the host's OpenCode credentials, so there is a single upstream credential and no per-request
+OpenCode key header. The OpenAI SDK's `apiKey` configures the wrapper Bearer credential.
 
 | Variable | Default | Description |
 |---|---:|---|
 | `HOST` | `0.0.0.0` | Address the API listens on |
 | `PORT` | `3000` | API port |
 | `API_KEY` | required | Secret used to authenticate wrapper requests with `Authorization: Bearer <API_KEY>` |
-| `OPENCODE_BIN` | `opencode` | OpenCode CLI command or path |
-| `OPENCODE_TIMEOUT_MS` | `120000` | Timeout for a chat request, in milliseconds |
+| `OPENCODE_BIN` | `opencode` | OpenCode CLI command or path used to spawn the `opencode serve` daemon |
+| `OPENCODE_PORT` | `4100` | Loopback port the supervised `opencode serve` daemon listens on |
+| `OPENCODE_BASE` | unset | Base URL of an existing `opencode serve` API to use instead of spawning one; overrides `OPENCODE_PORT` |
+| `OPENCODE_TIMEOUT_MS` | `120000` | Timeout for a chat request served over the serve API, in milliseconds |
+| `OPENCODE_SERVE_READY_TIMEOUT_MS` | `20000` | How long to wait for the supervised daemon to become healthy, in milliseconds |
 | `OPENCODE_MODELS_TTL_MS` | `300000` | How long to cache the model list, in milliseconds |
-| `OPENCODE_MODELS_TIMEOUT_MS` | `30000` | Timeout for reading the model list, in milliseconds |
-| `OPENCODE_PROXY_URL` | unset | Proxy URL applied to both HTTP and HTTPS for the spawned CLI |
+| `OPENCODE_PROXY_URL` | unset | Proxy URL applied to both HTTP and HTTPS for the supervised daemon |
 
 ## Outbound proxy
 
-Only the spawned `opencode run` CLI makes outbound requests. Configure its proxy with a single
-variable:
+The supervised `opencode serve` daemon makes the outbound model requests. Configure its proxy with
+a single variable:
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENCODE_PROXY_URL` | unset | Proxy URL applied to both HTTP and HTTPS for the CLI. Leave unset to connect directly. |
-| `NODE_EXTRA_CA_CERTS` | unset | Optional extra CA certificate file passed to the CLI. |
+| `OPENCODE_PROXY_URL` | unset | Proxy URL applied to both HTTP and HTTPS for the daemon. Leave unset to connect directly. |
+| `NODE_EXTRA_CA_CERTS` | unset | Optional extra CA certificate file for the daemon. |
 
-The wrapper sets the CLI's `HTTP_PROXY`/`HTTPS_PROXY` from `OPENCODE_PROXY_URL`, always bypasses
-the proxy for loopback (`localhost,127.0.0.1,::1`), and ignores any ambient
-`HTTP_PROXY`/`HTTPS_PROXY` — `OPENCODE_PROXY_URL` is the single source of truth.
+Loopback addresses (`localhost,127.0.0.1,::1`) are always bypassed. `OPENCODE_PROXY_URL` is the
+single source of truth for the proxy; ambient `HTTP_PROXY`/`HTTPS_PROXY` variables are ignored.
 
 For local development:
 
@@ -210,9 +206,11 @@ unavailable; upstream PR #10856 closed without merging, so configure the proxy w
 
 ## How it works
 
-For each request, the wrapper translates the API call into an OpenCode CLI run. It passes the
-conversation as a single prompt, then returns the CLI's response in the OpenAI format. When
-streaming is enabled, SSE delivers the response step by step.
+On the first request, the wrapper starts and supervises a local `opencode serve` daemon — or uses
+the one at `OPENCODE_BASE` — waiting until it is healthy before serving traffic. Each request
+translates the API call into a session on that daemon: the conversation is sent as a single prompt,
+and the response is returned in the OpenAI format. When streaming is enabled, SSE forwards the
+daemon's incremental text deltas. The daemon is stopped when the wrapper shuts down.
 
 ## Requirements
 

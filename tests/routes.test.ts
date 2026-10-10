@@ -87,7 +87,7 @@ describe("Routes (P6/P7)", () => {
     useRealCatalog.value = false;
   });
 
-  it("GET /v1/models returns only free ids without an upstream key", async () => {
+  it("GET /v1/models returns the full catalog", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
 
     expect(res.statusCode).toBe(200);
@@ -96,6 +96,7 @@ describe("Routes (P6/P7)", () => {
       data: [
         { id: "mimo-v2.6-flash-free", object: "model", owned_by: "opencode", context_length: 200000, max_model_len: 200000, max_output_tokens: 32000, max_input_tokens: 160000 },
         { id: "space-bunny-free", object: "model", owned_by: "opencode" },
+        { id: "claude-opus-5", object: "model", owned_by: "opencode", context_length: 100, max_model_len: 100, max_output_tokens: 20 },
       ],
     });
   });
@@ -122,19 +123,6 @@ describe("Routes (P6/P7)", () => {
 
     expect(res.statusCode).toBe(500);
     expect(res.json()).toMatchObject({ error: { type: "server_error", code: "opencode_error" } });
-  });
-
-  it("GET /v1/models returns all catalog ids with x-opencode-key", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/v1/models",
-      headers: { ...inboundHeaders, "x-opencode-key": "upstream-key" },
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(res.json().data.map((model: { id: string }) => model.id)).toEqual(
-      catalogFixture.map((model) => model.id),
-    );
   });
 
   it("GET /v1/models maps catalog failure to an OpenAI 500 error", async () => {
@@ -166,12 +154,12 @@ describe("Routes (P6/P7)", () => {
     expect(res.json().error.type).toBe("invalid_request_error");
   });
 
-  it("rejects a model outside the visible catalog with 404", async () => {
+  it("rejects a model absent from the catalog with 404", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
       headers: inboundHeaders,
-      payload: { model: "opencode/claude-opus-5", messages: [{ role: "user", content: "hi" }] },
+      payload: { model: "opencode/unknown-model", messages: [{ role: "user", content: "hi" }] },
     });
 
     expect(res.statusCode).toBe(404);
@@ -350,31 +338,20 @@ describe("Routes (P6/P7)", () => {
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;
 
   itIntegration(
-    "returns only free models without x-opencode-key and more models with x-opencode-key",
+    "returns the discovered catalog",
     async () => {
       useRealCatalog.value = true;
-      const freeResponse = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
+      const res = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
 
-      expect(freeResponse.statusCode).toBe(200);
-      const freeModels = freeResponse.json().data as Array<{ id: string }>;
-      expect(freeModels.length).toBeGreaterThan(0);
-      expect(freeModels.every((model) => model.id.endsWith("-free"))).toBe(true);
-
-      const authenticatedResponse = await app.inject({
-        method: "GET",
-        url: "/v1/models",
-        headers: { ...inboundHeaders, "x-opencode-key": "upstream-key" },
-      });
-
-      expect(authenticatedResponse.statusCode).toBe(200);
-      const authenticatedModels = authenticatedResponse.json().data as Array<{ id: string }>;
-      expect(authenticatedModels.length).toBeGreaterThan(freeModels.length);
+      expect(res.statusCode).toBe(200);
+      const models = res.json().data as Array<{ id: string }>;
+      expect(models.length).toBeGreaterThan(0);
     },
     120_000,
   );
 
   itIntegration(
-    "rejects a non-free model without x-opencode-key",
+    "rejects a model absent from the catalog with 404",
     async () => {
       useRealCatalog.value = true;
       const res = await app.inject({
@@ -382,7 +359,7 @@ describe("Routes (P6/P7)", () => {
         url: "/v1/chat/completions",
         headers: inboundHeaders,
         payload: {
-          model: "opencode/claude-opus-5",
+          model: "opencode/definitely-not-a-real-model",
           messages: [{ role: "user", content: "hi" }],
         },
       });

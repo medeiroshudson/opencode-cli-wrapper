@@ -4,6 +4,7 @@ import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { describeProxyEnv, ModelNotFoundError, resolveProxyEnv } from "./config/index.js";
 import { toOpenAIErrorBody } from "./lib/openai-format/index.js";
+import { getServeSupervisor } from "./lib/serve/runtime.js";
 import { chatRoutes } from "./routes/chat.js";
 import { modelsRoutes } from "./routes/models.js";
 
@@ -61,6 +62,10 @@ export function buildServer(apiKey = process.env.API_KEY): FastifyInstance {
 
   app.register(modelsRoutes);
   app.register(chatRoutes);
+
+  // Stop the supervised `opencode serve` daemon when the server closes, so it
+  // never outlives the wrapper holding the port.
+  app.addHook("onClose", () => getServeSupervisor().shutdown());
 
   app.get("/health", async () => ({ status: "ok" }));
 
