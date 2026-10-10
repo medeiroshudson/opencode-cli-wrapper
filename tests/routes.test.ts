@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
+import { wireClientDisconnect } from "../src/routes/chat.js";
 
 const catalogFixture = [
   { canonical: "opencode/mimo-v2.6-flash-free", provider: "opencode", id: "mimo-v2.6-flash-free", limits: { context: 200000, input: 160000, output: 32000 } },
@@ -48,6 +49,19 @@ vi.mock("../src/lib/serve/runtime.js", () => {
     resetRuntime: () => undefined,
   };
 });
+
+// Minimal response-like emitter for wireClientDisconnect: lets a test fire a
+// "close" event without a real socket.
+class FakeResponse {
+  writableFinished = false;
+  private readonly closeHandlers: Array<() => void> = [];
+  on(event: "close", cb: () => void): void {
+    if (event === "close") this.closeHandlers.push(cb);
+  }
+  emitClose(): void {
+    for (const cb of this.closeHandlers) cb();
+  }
+}
 
 describe("Routes (P6/P7)", () => {
   let app: FastifyInstance;
@@ -311,30 +325,26 @@ describe("Routes (P6/P7)", () => {
     expect(deleteSpy).toHaveBeenCalled();
   });
 
-  it("does not abort the session on a normal stream completion", async () => {
-    const { getServeClient } = await import("../src/lib/serve/runtime.js");
-    const client = getServeClient();
-    const abortSpy = vi.spyOn(client, "abortSession").mockResolvedValue(undefined);
-    const deleteSpy = vi.spyOn(client, "deleteSession").mockResolvedValue(undefined);
-    abortSpy.mockClear();
-    deleteSpy.mockClear();
-    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "ok" } };
-      yield { type: "session.idle", properties: {} };
-    } as never;
+  it("wireClientDisconnect aborts when the response closes unfinished (real disconnect)", () => {
+    const res = new FakeResponse();
+    res.writableFinished = false;
+    const controller = new AbortController();
 
-    const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
-    const result = await runStreamingTurn(client, {
-      model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
-      prompt: "hi",
-      tools: [],
-      toolChoice: "auto",
-      onDelta: () => {},
-    });
+    wireClientDisconnect(res, controller);
+    res.emitClose();
 
-    expect(result.content).toBe("ok");
-    expect(deleteSpy).toHaveBeenCalled();
-    expect(abortSpy).not.toHaveBeenCalled();
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("wireClientDisconnect does not abort when the response finished normally", () => {
+    const res = new FakeResponse();
+    res.writableFinished = true;
+    const controller = new AbortController();
+
+    wireClientDisconnect(res, controller);
+    res.emitClose();
+
+    expect(controller.signal.aborted).toBe(false);
   });
 
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;

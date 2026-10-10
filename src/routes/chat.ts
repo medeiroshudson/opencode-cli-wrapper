@@ -58,6 +58,22 @@ function splitCanonical(canonical: string): { providerID: string; modelID: strin
   return { providerID: canonical.slice(0, slash), modelID: canonical.slice(slash + 1) };
 }
 
+// Aborts `controller` on a real client disconnect — the RESPONSE closing before it
+// finished. A normal completion ends the response (writableFinished true) before the
+// socket closes, so it must NOT abort.
+//
+// Listening on the request instead is wrong: `request.raw` "close" fires as soon as
+// the request body is fully read (≈1 ms into the handler), which would abort every
+// normal streaming POST.
+export function wireClientDisconnect(
+  res: { on(event: "close", cb: () => void): void; writableFinished: boolean },
+  controller: AbortController,
+): void {
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
+}
+
 export async function chatRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: ChatRequestBody }>(
     "/v1/chat/completions",
@@ -128,14 +144,10 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         const created = Math.floor(Date.now() / 1000);
         let started = false;
         let roleSent = false;
-        let disconnected = false;
         // A consumer that goes away mid-turn aborts this controller; runStreamingTurn
         // then stops the generation and deletes the session instead of leaking it.
         const disconnect = new AbortController();
-        request.raw.on("close", () => {
-          disconnected = true;
-          disconnect.abort();
-        });
+        wireClientDisconnect(reply.raw, disconnect);
 
         const writeChunk = (delta: DeltaContent, finish: string | null): void => {
           if (!started) {
@@ -157,7 +169,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
             ...turnParams,
             signal: disconnect.signal,
             onDelta: (chunk) => {
-              if (disconnected || reply.raw.destroyed || reply.raw.writableEnded) {
+              if (disconnect.signal.aborted || reply.raw.destroyed || reply.raw.writableEnded) {
                 throw new Error("client disconnected");
               }
               writeChunk({ content: chunk }, null);
