@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import type { AuthContext } from "../src/lib/opencode/auth.js";
 import type { CatalogEntry } from "../src/lib/opencode/models.js";
 import {
+  getServeBaseUrl,
+  getServePort,
+  getServeReadinessTimeoutMs,
   getTimeoutMs,
   listModels,
   modelsDevMetadata,
@@ -155,5 +158,27 @@ describe("ZEN model preference", () => {
         limit: { context: 20, input: 16, output: 4 },
       },
     });
+  });
+});
+
+describe("serve env", () => {
+  it("defaults base url to loopback on the default port", () => {
+    expect(getServePort({})).toBe(4100);
+    expect(getServeBaseUrl({})).toBe("http://127.0.0.1:4100");
+  });
+
+  it("reads OPENCODE_BASE at runtime and strips trailing slashes", () => {
+    expect(getServeBaseUrl({ OPENCODE_BASE: "http://serve.internal:9999/" })).toBe(
+      "http://serve.internal:9999",
+    );
+  });
+
+  it("derives the base url from OPENCODE_PORT when OPENCODE_BASE is unset", () => {
+    expect(getServeBaseUrl({ OPENCODE_PORT: "4200" })).toBe("http://127.0.0.1:4200");
+  });
+
+  it("defaults the readiness timeout to 20000ms and reads the override", () => {
+    expect(getServeReadinessTimeoutMs({})).toBe(20_000);
+    expect(getServeReadinessTimeoutMs({ OPENCODE_SERVE_READY_TIMEOUT_MS: "5000" })).toBe(5_000);
   });
 });

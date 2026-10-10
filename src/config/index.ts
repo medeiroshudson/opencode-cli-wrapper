@@ -65,6 +65,32 @@ export function getTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   return 120_000;
 }
 
+export function getServePort(env: NodeJS.ProcessEnv = process.env): number {
+  const value = env.OPENCODE_PORT;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) return parsed;
+  }
+  return 4100;
+}
+
+export function getServeBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.OPENCODE_BASE;
+  if (typeof configured === "string" && configured.trim().length > 0) {
+    return configured.trim().replace(/\/+$/, "");
+  }
+  return `http://127.0.0.1:${getServePort(env)}`;
+}
+
+export function getServeReadinessTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const value = env.OPENCODE_SERVE_READY_TIMEOUT_MS;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return 20_000;
+}
+
 function providerRank(provider: string): number {
   if (provider === ZEN_PROVIDER) return 0;
   if (provider === GO_PROVIDER) return 1;
