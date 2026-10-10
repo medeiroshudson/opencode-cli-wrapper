@@ -141,9 +141,10 @@ tests/
 Três unidades novas, cada uma com propósito único e testável isolado:
 
 - **`serve/process.ts`** — ciclo de vida do daemon. Interface:
-  `ensureReady()`, `baseUrl()`, `shutdown()`. Se `OPENCODE_BASE` responde
-  `healthy`, usa; senão spawna `opencode serve --hostname 127.0.0.1`, espera
-  readiness (timeout configurável) e encerra no shutdown.
+  `ensureReady()`, `baseUrl()`, `shutdown()`. A URL é resolvida **em runtime** a
+  partir de `OPENCODE_BASE` (default `http://127.0.0.1:${OPENCODE_PORT}`). Se ela
+  responde `healthy`, usa; senão spawna `opencode serve --hostname 127.0.0.1`,
+  espera readiness (timeout configurável) e encerra no shutdown.
 - **`serve/client.ts`** — transporte. Métodos finos sobre os endpoints de §3.3.
 - **`serve/events.ts`** — parsing dos blocos SSE (`data:`/`[DONE]`) em eventos.
 
@@ -219,7 +220,7 @@ ocorre na implementação.
 
 | Env | Default | Nota |
 |---|---|---|
-| `OPENCODE_BASE` | `http://127.0.0.1:4100` | URL do serve; se saudável, usa |
+| `OPENCODE_BASE` | lido do env em runtime; default `http://127.0.0.1:${OPENCODE_PORT}` | URL do serve; se saudável, usa. **Resolvido em runtime**, não fixado em build |
 | `OPENCODE_PORT` | `4100` | porta do serve spawnado |
 | `OPENCODE_BIN` | `opencode` | binário para spawnar o serve |
 | `OPENCODE_TIMEOUT_MS` | `120000` | timeout por request |
