@@ -18,8 +18,31 @@ vi.mock("../src/lib/opencode/models.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/opencode/models.js")>();
   return {
     ...actual,
-    getCatalog: (env?: NodeJS.ProcessEnv) =>
-      useRealCatalog.value ? actual.getCatalog(env) : getCatalogMock(env),
+    getCatalog: (client?: unknown, env?: NodeJS.ProcessEnv) =>
+      useRealCatalog.value ? actual.getCatalog(undefined, env) : getCatalogMock(env),
+  };
+});
+
+// The runtime module must hand back STABLE singletons: the route and the tests
+// both resolve getServeClient() to the same object, so vi.spyOn in a test can
+// intercept the very instance the route calls.
+vi.mock("../src/lib/serve/runtime.js", () => {
+  const client = {
+    health: async () => true,
+    createSession: async () => "ses_test",
+    postMessage: async () => ({ info: { finish: "stop" }, parts: [{ type: "text", text: "pong" }] }),
+    deleteSession: async () => undefined,
+    abortSession: async () => undefined,
+  };
+  const supervisor = {
+    ensureReady: async () => undefined,
+    baseUrl: () => "http://x",
+    shutdown: async () => undefined,
+  };
+  return {
+    getServeClient: () => client,
+    getServeSupervisor: () => supervisor,
+    resetRuntime: () => undefined,
   };
 });
 
@@ -128,6 +151,35 @@ describe("Routes (P6/P7)", () => {
 
     expect(res.statusCode).toBe(404);
     expect(res.json()).toMatchObject({ error: { type: "server_error", code: "opencode_error" } });
+  });
+
+  it("returns a non-stream completion via the serve client", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      object: "chat.completion",
+      choices: [{ index: 0, message: { role: "assistant", content: "pong" }, finish_reason: "stop" }],
+    });
+  });
+
+  it("maps an upstream serve failure to 502", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    vi.spyOn(getServeClient(), "postMessage").mockRejectedValueOnce(new Error("ECONNREFUSED"));
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.statusCode).toBe(502);
   });
 
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;

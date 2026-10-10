@@ -5,8 +5,10 @@ import { applyAnchors, composePrompt } from "../lib/opencode/compose.js";
 import { extractAuth } from "../lib/opencode/auth.js";
 import { CatalogError, getCatalog } from "../lib/opencode/models.js";
 import type { CatalogEntry } from "../lib/opencode/models.js";
-import { runOnce } from "../lib/opencode/runner.js";
-import { buildCompletion, buildSseBody, SSE_DONE, toOpenAIErrorBody } from "../lib/openai-format/index.js";
+import { extractToolDefs, toolInstruction } from "../lib/opencode/tools.js";
+import { runTurn } from "../lib/opencode/turn.js";
+import { getServeClient, getServeSupervisor } from "../lib/serve/runtime.js";
+import { buildCompletion, buildSseBody, toOpenAIErrorBody } from "../lib/openai-format/index.js";
 
 interface ChatRequestBody {
   model: string;
@@ -15,6 +17,8 @@ interface ChatRequestBody {
   temperature?: number;
   max_tokens?: number;
   variant?: string;
+  tools?: unknown[];
+  tool_choice?: unknown;
 }
 
 const chatBodySchema = {
@@ -39,9 +43,18 @@ const chatBodySchema = {
       temperature: { type: "number" },
       max_tokens: { type: "integer" },
       variant: { type: "string" },
+      tools: { type: "array" },
+      tool_choice: {},
     },
   },
 } as const;
+
+// The catalog canonical is always "provider/id"; split on the first slash.
+function splitCanonical(canonical: string): { providerID: string; modelID: string } {
+  const slash = canonical.indexOf("/");
+  if (slash < 0) return { providerID: canonical, modelID: canonical };
+  return { providerID: canonical.slice(0, slash), modelID: canonical.slice(slash + 1) };
+}
 
 export async function chatRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: ChatRequestBody }>(
@@ -73,33 +86,38 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         throw err;
       }
 
-      const prompt = applyAnchors(composePrompt(body.messages), {
+      const tools = extractToolDefs(body);
+      const instruction = toolInstruction(tools, body.tool_choice);
+      let prompt = applyAnchors(composePrompt(body.messages), {
         temperature: body.temperature,
         maxTokens: body.max_tokens,
       });
-      const env = { ...process.env, ...(auth.token ? { OPENCODE_API_KEY: auth.token } : {}) };
-      const result = await runOnce({ model: canonicalModel, prompt, variant: body.variant }, env);
+      if (instruction) prompt = `${prompt}\n\n${instruction}`;
 
-      if (!body.stream) {
-        if (result.error) {
-          const mapped = toOpenAIErrorBody(new Error(result.error), 500);
-          reply.status(mapped.status).send(mapped.body);
+      try {
+        await getServeSupervisor().ensureReady();
+        const result = await runTurn(getServeClient(), {
+          model: splitCanonical(canonicalModel),
+          prompt,
+          variant: body.variant,
+          tools,
+          toolChoice: body.tool_choice,
+        });
+
+        if (!body.stream) {
+          if (result.sessionId) reply.header("x-opencode-session-id", result.sessionId);
+          reply.status(200).send(buildCompletion(result, body.model));
           return;
         }
-        if (result.sessionId) reply.header("x-opencode-session-id", result.sessionId);
-        reply.status(200).send(buildCompletion(result, body.model));
-        return;
-      }
 
-      // Buffered single-step SSE: `opencode run --format json` emits one text event per step.
-      reply.header("Content-Type", "text/event-stream");
-      reply.header("Cache-Control", "no-store");
-      if (result.error) {
-        const errorFrame = `data: ${JSON.stringify({ error: result.error })}\n\n`;
-        reply.send(errorFrame + SSE_DONE);
-        return;
+        // Buffered SSE: one text/tool chunk set plus a terminal frame, then [DONE].
+        reply.header("Content-Type", "text/event-stream");
+        reply.header("Cache-Control", "no-store");
+        reply.send(buildSseBody(result, body.model));
+      } catch (error) {
+        const mapped = toOpenAIErrorBody(error, 502);
+        reply.status(mapped.status).send(mapped.body);
       }
-      reply.send(buildSseBody(result.content, body.model, result.finish_reason));
     },
   );
 }

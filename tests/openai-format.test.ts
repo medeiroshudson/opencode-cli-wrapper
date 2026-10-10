@@ -8,15 +8,16 @@ import {
   buildSseBody,
   toOpenAIErrorBody,
 } from "../src/lib/openai-format/index.js";
-import type { RunResultLike } from "../src/lib/openai-format/index.js";
+import type { TurnResult } from "../src/lib/openai-format/index.js";
 
 describe("OpenAI format layer (P5)", () => {
   it("buildCompletionWithId produces exact fields for a fixed id/created", () => {
-    const result: RunResultLike = {
+    const result: TurnResult = {
       content: "Hello world",
       finish_reason: "stop",
       usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
       sessionId: "sess-1",
+      toolCalls: [],
     };
 
     const out = buildCompletionWithId(result, "gpt-4", "chatcmpl-test-1", 1234567890);
@@ -32,7 +33,10 @@ describe("OpenAI format layer (P5)", () => {
   });
 
   it("buildCompletion omits usage when null and uses seconds for created", () => {
-    const out = buildCompletion({ content: "Hi", finish_reason: "stop", usage: null }, "gpt-4");
+    const out = buildCompletion(
+      { content: "Hi", finish_reason: "stop", usage: null, sessionId: null, toolCalls: [] },
+      "gpt-4",
+    );
 
     expect(out.usage).toBeUndefined();
     expect(out.id.startsWith("chatcmpl-")).toBe(true);
@@ -46,7 +50,10 @@ describe("SSE helpers", () => {
   });
 
   it("buildSseBody emits a content chunk, a final chunk, then DONE", () => {
-    const body = buildSseBody("chunked", "gpt-4", "stop");
+    const body = buildSseBody(
+      { content: "chunked", finish_reason: "stop", usage: null, sessionId: null, toolCalls: [] },
+      "gpt-4",
+    );
 
     expect(body).toContain("chat.completion.chunk");
     expect(body).toContain('"content":"chunked"');

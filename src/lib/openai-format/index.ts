@@ -1,17 +1,14 @@
 // PHASE P5 — OpenAI-compatible format layer.
-// Translates a RunResult into OpenAI-shaped responses, SSE chunks, and error bodies.
+// Translates a TurnResult into OpenAI-shaped responses, SSE chunks, and error bodies.
 
 import { randomUUID } from "node:crypto";
 
-export interface RunResultLike {
+export interface TurnResult {
   content: string;
   finish_reason: string;
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  } | null;
-  sessionId?: string | null;
+  usage: Usage | null;
+  sessionId: string | null;
+  toolCalls: Array<{ id: string; name: string; arguments: string }>;
 }
 
 export type Usage = {
@@ -20,9 +17,15 @@ export type Usage = {
   total_tokens: number;
 };
 
+export type CompletionToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
 export type CompletionChoice = {
   index: number;
-  message: { role: string; content: string };
+  message: { role: string; content: string | null; tool_calls?: CompletionToolCall[] };
   finish_reason: string | null;
 };
 
@@ -35,7 +38,14 @@ export type ChatCompletion = {
   usage?: Usage;
 };
 
-export type DeltaContent = { content?: string };
+export type DeltaToolCall = {
+  index: number;
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+export type DeltaContent = { content?: string; tool_calls?: DeltaToolCall[] };
 
 export type ChatCompletionChunk = {
   id: string;
@@ -67,7 +77,7 @@ function detectStatus(err: unknown): number | null {
 }
 
 export function buildCompletionWithId(
-  result: RunResultLike,
+  result: TurnResult,
   model: string,
   id: string,
   created: number,
@@ -80,7 +90,19 @@ export function buildCompletionWithId(
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: result.content },
+        message: {
+          role: "assistant",
+          content: result.toolCalls.length > 0 ? result.content || null : result.content,
+          ...(result.toolCalls.length > 0
+            ? {
+                tool_calls: result.toolCalls.map((c) => ({
+                  id: c.id,
+                  type: "function" as const,
+                  function: { name: c.name, arguments: c.arguments },
+                })),
+              }
+            : {}),
+        },
         finish_reason: result.finish_reason,
       },
     ],
@@ -89,7 +111,7 @@ export function buildCompletionWithId(
   return completion;
 }
 
-export function buildCompletion(result: RunResultLike, model: string): ChatCompletion {
+export function buildCompletion(result: TurnResult, model: string): ChatCompletion {
   const id = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
   return buildCompletionWithId(result, model, id, created);
@@ -117,12 +139,32 @@ export function sseEvent(payload: unknown): string {
 
 export const SSE_DONE = "data: [DONE]\n\n";
 
-export function buildSseBody(content: string, model: string, finishReason: string): string {
+export function buildSseBody(result: TurnResult, model: string): string {
   const id = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
-  const contentChunk = buildChunk(id, model, created, { content }, null);
-  const finalChunk = buildChunk(id, model, created, {}, finishReason);
-  return sseEvent(contentChunk) + sseEvent(finalChunk) + SSE_DONE;
+  let body = sseEvent(buildChunk(id, model, created, { content: "" }, null));
+  if (result.toolCalls.length > 0) {
+    for (const [i, c] of result.toolCalls.entries()) {
+      body += sseEvent(
+        buildChunk(
+          id,
+          model,
+          created,
+          {
+            tool_calls: [
+              { index: i, id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } },
+            ],
+          },
+          null,
+        ),
+      );
+    }
+    body += sseEvent(buildChunk(id, model, created, {}, "tool_calls"));
+  } else {
+    body += sseEvent(buildChunk(id, model, created, { content: result.content }, null));
+    body += sseEvent(buildChunk(id, model, created, {}, result.finish_reason));
+  }
+  return body + SSE_DONE;
 }
 
 export function toOpenAIErrorBody(

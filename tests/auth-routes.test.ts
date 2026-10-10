@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 
-const { getCatalogMock, runOnceMock } = vi.hoisted(() => ({
+const { getCatalogMock, createSessionMock, postMessageMock } = vi.hoisted(() => ({
   getCatalogMock: vi.fn(),
-  runOnceMock: vi.fn(),
+  createSessionMock: vi.fn(),
+  postMessageMock: vi.fn(),
 }));
 
 vi.mock("../src/lib/opencode/models.js", async (importOriginal) => {
@@ -12,9 +13,25 @@ vi.mock("../src/lib/opencode/models.js", async (importOriginal) => {
   return { ...actual, getCatalog: getCatalogMock };
 });
 
-vi.mock("../src/lib/opencode/runner.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/lib/opencode/runner.js")>();
-  return { ...actual, runOnce: runOnceMock };
+// Stable singletons: the route and these tests must share one client instance.
+vi.mock("../src/lib/serve/runtime.js", () => {
+  const client = {
+    health: async () => true,
+    createSession: createSessionMock,
+    postMessage: postMessageMock,
+    deleteSession: async () => undefined,
+    abortSession: async () => undefined,
+  };
+  const supervisor = {
+    ensureReady: async () => undefined,
+    baseUrl: () => "http://x",
+    shutdown: async () => undefined,
+  };
+  return {
+    getServeClient: () => client,
+    getServeSupervisor: () => supervisor,
+    resetRuntime: () => undefined,
+  };
 });
 
 const catalog = [
@@ -30,11 +47,10 @@ describe("Global route authentication", () => {
     vi.stubEnv("API_KEY", "test-inbound-key");
     getCatalogMock.mockReset();
     getCatalogMock.mockResolvedValue(catalog);
-    runOnceMock.mockReset();
-    runOnceMock.mockResolvedValue({
-      content: "hello", chunks: ["hello"], finish_reason: "stop", usage: null,
-      sessionId: null, error: null, toolCalls: 0,
-    });
+    createSessionMock.mockReset();
+    createSessionMock.mockResolvedValue("ses_test");
+    postMessageMock.mockReset();
+    postMessageMock.mockResolvedValue({ info: { finish: "stop" }, parts: [{ type: "text", text: "hello" }] });
     app = buildServer("test-inbound-key");
   });
 
@@ -95,7 +111,7 @@ describe("Global route authentication", () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it("does not let x-opencode-key authenticate and forwards it separately to the child", async () => {
+  it("does not let x-opencode-key authenticate, and routes the chat turn through the serve client", async () => {
     const unauthorized = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
@@ -113,14 +129,13 @@ describe("Global route authentication", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(runOnceMock).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "opencode/mimo-v2.6-flash-free" }),
-      expect.objectContaining({ OPENCODE_API_KEY: "upstream-key" }),
+    expect(postMessageMock).toHaveBeenCalledWith(
+      "ses_test",
+      expect.objectContaining({ model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" } }),
     );
-    expect(runOnceMock.mock.calls[0]?.[1]).not.toHaveProperty("OPENCODE_API_KEY", "test-inbound-key");
   });
 
-  it("does not set an OpenCode key when x-opencode-key is absent", async () => {
+  it("serves a free model through the serve client when x-opencode-key is absent", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
@@ -129,6 +144,6 @@ describe("Global route authentication", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(runOnceMock.mock.calls[0]?.[1]).not.toHaveProperty("OPENCODE_API_KEY");
+    expect(postMessageMock.mock.calls[0]?.[1]).not.toHaveProperty("OPENCODE_API_KEY");
   });
 });
