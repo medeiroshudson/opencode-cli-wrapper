@@ -154,6 +154,19 @@ const response = await client.chat.completions.create({
 console.log(response.choices[0]?.message.content);
 ```
 
+### Tool reliability harness
+
+`npm run tools:reliability` measures how often each `tool_choice` mode actually produces tool
+calls. It fires five requests per mode (`required`, a named function, `auto`, and unset) at
+`/v1/chat/completions` with a `get_weather` tool and prints a `choice | hits` table. It is an
+on-demand diagnostic, not part of the test suite: it requires the wrapper to be running and
+`API_KEY` to be set in the environment. Point it at a different base URL with `WRAPPER_URL`
+(default `http://127.0.0.1:3000`).
+
+```bash
+API_KEY=your-wrapper-key npm run tools:reliability
+```
+
 ## Configuration
 
 `API_KEY` is the required wrapper ingress credential. Set it to a locally generated secret in
