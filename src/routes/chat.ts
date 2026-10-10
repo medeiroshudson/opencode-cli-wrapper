@@ -64,6 +64,16 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       const body = request.body;
       const auth = extractAuth(request.headers["x-opencode-key"]);
 
+      // The daemon must be up before the catalog fetch: getServeClient() only
+      // constructs a client, so a cold start would otherwise hit a dead port.
+      try {
+        await getServeSupervisor().ensureReady();
+      } catch (error) {
+        const mapped = toOpenAIErrorBody(error, 502);
+        reply.status(mapped.status).send(mapped.body);
+        return;
+      }
+
       let entries: CatalogEntry[];
       try {
         entries = await getCatalog();
@@ -95,7 +105,6 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       if (instruction) prompt = `${prompt}\n\n${instruction}`;
 
       try {
-        await getServeSupervisor().ensureReady();
         const result = await runTurn(getServeClient(), {
           model: splitCanonical(canonicalModel),
           prompt,

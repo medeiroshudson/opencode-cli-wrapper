@@ -9,9 +9,11 @@ const catalogFixture = [
 ];
 const inboundHeaders = { authorization: "Bearer test-inbound-key" };
 
-const { getCatalogMock, useRealCatalog } = vi.hoisted(() => ({
+const { getCatalogMock, useRealCatalog, ensureReadyMock, callLog } = vi.hoisted(() => ({
   getCatalogMock: vi.fn(),
   useRealCatalog: { value: false },
+  ensureReadyMock: vi.fn(),
+  callLog: [] as string[],
 }));
 
 vi.mock("../src/lib/opencode/models.js", async (importOriginal) => {
@@ -25,7 +27,8 @@ vi.mock("../src/lib/opencode/models.js", async (importOriginal) => {
 
 // The runtime module must hand back STABLE singletons: the route and the tests
 // both resolve getServeClient() to the same object, so vi.spyOn in a test can
-// intercept the very instance the route calls.
+// intercept the very instance the route calls. ensureReady records into callLog
+// so a test can pin that the daemon is made ready before the catalog is fetched.
 vi.mock("../src/lib/serve/runtime.js", () => {
   const client = {
     health: async () => true,
@@ -35,7 +38,7 @@ vi.mock("../src/lib/serve/runtime.js", () => {
     abortSession: async () => undefined,
   };
   const supervisor = {
-    ensureReady: async () => undefined,
+    ensureReady: ensureReadyMock,
     baseUrl: () => "http://x",
     shutdown: async () => undefined,
   };
@@ -51,8 +54,16 @@ describe("Routes (P6/P7)", () => {
 
   beforeEach(() => {
     vi.stubEnv("API_KEY", "test-inbound-key");
+    callLog.length = 0;
+    ensureReadyMock.mockReset();
+    ensureReadyMock.mockImplementation(async () => {
+      callLog.push("ready");
+    });
     getCatalogMock.mockReset();
-    getCatalogMock.mockResolvedValue(catalogFixture);
+    getCatalogMock.mockImplementation(async () => {
+      callLog.push("catalog");
+      return catalogFixture;
+    });
     app = buildServer("test-inbound-key");
   });
 
@@ -180,6 +191,25 @@ describe("Routes (P6/P7)", () => {
     });
 
     expect(res.statusCode).toBe(502);
+  });
+
+  it("makes the serve daemon ready before fetching the catalog on chat", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(callLog).toEqual(["ready", "catalog"]);
+  });
+
+  it("makes the serve daemon ready before fetching the catalog on GET /v1/models", async () => {
+    const res = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
+
+    expect(res.statusCode).toBe(200);
+    expect(callLog).toEqual(["ready", "catalog"]);
   });
 
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;
