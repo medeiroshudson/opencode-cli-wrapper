@@ -212,6 +212,54 @@ describe("Routes (P6/P7)", () => {
     expect(callLog).toEqual(["ready", "catalog"]);
   });
 
+  it("streams incremental deltas ending with [DONE]", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient() as unknown as { streamEvents: () => AsyncGenerator<unknown> };
+    client.streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "he" } };
+      yield { type: "message.part.delta", properties: { field: "text", delta: "llo" } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }], stream: true },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    expect(res.body).toContain('"content":"he"');
+    expect(res.body).toContain('"content":"llo"');
+    expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
+  it("aborts and deletes the session when the client disconnects", async () => {
+    const { getServeClient } = await import("../src/lib/serve/runtime.js");
+    const client = getServeClient();
+    const deleteSpy = vi.spyOn(client, "deleteSession").mockResolvedValue(undefined);
+    const abortSpy = vi.spyOn(client, "abortSession").mockResolvedValue(undefined);
+    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
+      yield { type: "message.part.delta", properties: { field: "text", delta: "x" } };
+      yield { type: "session.idle", properties: {} };
+    } as never;
+
+    const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
+    await runStreamingTurn(client, {
+      model: { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+      prompt: "hi",
+      tools: [],
+      toolChoice: "auto",
+      onDelta: () => {
+        throw Object.assign(new Error("client gone"), { code: "ABORT_ERR" });
+      },
+    }).catch(() => undefined);
+
+    expect(abortSpy).toHaveBeenCalled();
+    expect(deleteSpy).toHaveBeenCalled();
+  });
+
   const itIntegration = process.env.INTEGRATION === "1" ? it : it.skip;
 
   itIntegration(

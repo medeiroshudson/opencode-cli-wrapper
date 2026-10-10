@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
 import { ModelNotFoundError, resolveModel } from "../config/index.js";
 import type { ChatMessage } from "../lib/opencode/compose.js";
 import { applyAnchors, composePrompt } from "../lib/opencode/compose.js";
@@ -6,9 +7,10 @@ import { extractAuth } from "../lib/opencode/auth.js";
 import { CatalogError, getCatalog } from "../lib/opencode/models.js";
 import type { CatalogEntry } from "../lib/opencode/models.js";
 import { extractToolDefs, toolInstruction } from "../lib/opencode/tools.js";
-import { runTurn } from "../lib/opencode/turn.js";
+import { runStreamingTurn, runTurn } from "../lib/opencode/turn.js";
 import { getServeClient, getServeSupervisor } from "../lib/serve/runtime.js";
-import { buildCompletion, buildSseBody, toOpenAIErrorBody } from "../lib/openai-format/index.js";
+import type { DeltaContent } from "../lib/openai-format/index.js";
+import { buildChunk, buildCompletion, sseEvent, SSE_DONE, toOpenAIErrorBody } from "../lib/openai-format/index.js";
 
 interface ChatRequestBody {
   model: string;
@@ -104,25 +106,89 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       });
       if (instruction) prompt = `${prompt}\n\n${instruction}`;
 
-      try {
-        const result = await runTurn(getServeClient(), {
-          model: splitCanonical(canonicalModel),
-          prompt,
-          variant: body.variant,
-          tools,
-          toolChoice: body.tool_choice,
-        });
+      const turnParams = {
+        model: splitCanonical(canonicalModel),
+        prompt,
+        variant: body.variant,
+        tools,
+        toolChoice: body.tool_choice,
+      };
+      const client = getServeClient();
 
+      try {
         if (!body.stream) {
+          const result = await runTurn(client, turnParams);
           if (result.sessionId) reply.header("x-opencode-session-id", result.sessionId);
           reply.status(200).send(buildCompletion(result, body.model));
           return;
         }
 
-        // Buffered SSE: one text/tool chunk set plus a terminal frame, then [DONE].
-        reply.header("Content-Type", "text/event-stream");
-        reply.header("Cache-Control", "no-store");
-        reply.send(buildSseBody(result, body.model));
+        // Real SSE: stream incremental text deltas, then tool calls / finish, then [DONE].
+        const id = `chatcmpl-${randomUUID()}`;
+        const created = Math.floor(Date.now() / 1000);
+        let started = false;
+        let roleSent = false;
+        let disconnected = false;
+        // A consumer that goes away mid-turn flips this; onDelta then throws so the
+        // turn aborts and deletes its session instead of leaking the generation.
+        request.raw.on("close", () => {
+          disconnected = true;
+        });
+
+        const writeChunk = (delta: DeltaContent, finish: string | null): void => {
+          if (!started) {
+            started = true;
+            reply.hijack();
+            reply.raw.writeHead(200, {
+              "content-type": "text/event-stream",
+              "cache-control": "no-store",
+            });
+          }
+          // The first chunk carries the role, so OpenAI clients see delta.role first.
+          const payload = roleSent ? delta : { role: "assistant", ...delta };
+          roleSent = true;
+          reply.raw.write(sseEvent(buildChunk(id, body.model, created, payload, finish)));
+        };
+
+        try {
+          const result = await runStreamingTurn(client, {
+            ...turnParams,
+            onDelta: (chunk) => {
+              if (disconnected || reply.raw.destroyed || reply.raw.writableEnded) {
+                throw new Error("client disconnected");
+              }
+              writeChunk({ content: chunk }, null);
+            },
+          });
+
+          if (result.toolCalls.length > 0) {
+            for (const [i, c] of result.toolCalls.entries()) {
+              writeChunk(
+                {
+                  tool_calls: [
+                    { index: i, id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } },
+                  ],
+                },
+                null,
+              );
+            }
+            writeChunk({}, "tool_calls");
+          } else {
+            writeChunk({}, result.finish_reason);
+          }
+          reply.raw.write(SSE_DONE);
+        } catch (error) {
+          const mapped = toOpenAIErrorBody(error, 502);
+          // Headers are already on the wire; surface the failure inside the stream.
+          if (started) {
+            reply.raw.write(sseEvent({ error: mapped.body.error }));
+          } else {
+            reply.status(mapped.status).send(mapped.body);
+            return;
+          }
+        } finally {
+          if (started) reply.raw.end();
+        }
       } catch (error) {
         const mapped = toOpenAIErrorBody(error, 502);
         reply.status(mapped.status).send(mapped.body);

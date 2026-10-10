@@ -2,6 +2,7 @@
 
 import type { ServeClient, ServeMessageResponse, ServeTokens } from "../serve/client.js";
 import type { TurnResult } from "../openai-format/index.js";
+import { isFinish, partText, textDelta } from "../serve/events.js";
 import { buildToolJsonSchema, parseToolCalls, toolChoiceMode } from "./tools.js";
 import type { ToolDef } from "./tools.js";
 
@@ -12,6 +13,10 @@ export interface TurnParams {
   prompt: string;
   tools: ToolDef[];
   toolChoice: unknown;
+}
+
+export interface StreamingParams extends TurnParams {
+  onDelta: (chunk: string) => void;
 }
 
 function mapUsage(tokens: ServeTokens | undefined): TurnResult["usage"] {
@@ -55,6 +60,69 @@ export async function runTurn(client: ServeClient, params: TurnParams): Promise<
       toolCalls,
     };
   } finally {
+    await client.deleteSession(sessionId).catch(() => undefined);
+  }
+}
+
+// Streaming variant: opens the session event stream BEFORE posting the message,
+// forwards each text delta to onDelta as it arrives, then assembles the final
+// TurnResult (including tool calls parsed out of the assembled text).
+//
+// If onDelta throws — the consumer went away mid-turn — the turn is aborted and
+// the session deleted so neither the generation nor the session leaks.
+export async function runStreamingTurn(client: ServeClient, params: StreamingParams): Promise<TurnResult> {
+  const sessionId = await client.createSession();
+  const controller = new AbortController();
+  const emptyResponse: ServeMessageResponse = { info: {}, parts: [] };
+  let assembled = "";
+  let aborted = false;
+  try {
+    const payload: Record<string, unknown> = {
+      model: params.model,
+      parts: [{ type: "text", text: params.prompt }],
+    };
+    if (params.system) payload.system = params.system;
+    if (params.variant) payload.variant = params.variant;
+
+    const stream = client.streamEvents(sessionId, controller.signal);
+    const posted = client.postMessage(sessionId, payload);
+    // Swallow a late rejection when we skip awaiting `posted` after an abort.
+    posted.catch(() => undefined);
+
+    for await (const ev of stream) {
+      const delta = textDelta(ev);
+      if (delta !== null) {
+        assembled += delta;
+        try {
+          params.onDelta(delta);
+        } catch {
+          aborted = true;
+          controller.abort();
+          break;
+        }
+      } else {
+        const full = partText(ev);
+        if (full !== null && assembled.length === 0) assembled = full;
+      }
+      if (isFinish(ev)) break;
+    }
+
+    // On abort, do NOT await the in-flight message: it resolves only when the
+    // (still running) generation completes, which would defeat the abort.
+    const res = aborted ? emptyResponse : await posted.catch(() => emptyResponse);
+    if (!assembled) assembled = textFromParts(res);
+    const known = new Set(params.tools.map((t) => t.name));
+    const { content, calls } = parseToolCalls(assembled, known);
+    const toolCalls = calls.map((c, i) => ({ id: `call_${sessionId}_${i}`, name: c.name, arguments: c.arguments }));
+    return {
+      content: toolCalls.length > 0 ? content : content || assembled,
+      finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      usage: mapUsage(res.info?.tokens),
+      sessionId,
+      toolCalls,
+    };
+  } finally {
+    if (aborted) await client.abortSession(sessionId).catch(() => undefined);
     await client.deleteSession(sessionId).catch(() => undefined);
   }
 }
