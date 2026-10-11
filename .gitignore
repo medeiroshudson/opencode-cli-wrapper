@@ -22,3 +22,6 @@ npm-debug.log*
 # Agent tooling state
 .omo/
 .codegraph
+
+# Spikes Files
+spikes/

@@ -41,11 +41,10 @@ describe("ServeClient", () => {
     expect(fake.calls.deleteSession).toBe(1);
   });
 
-  it("streams serve events from the session event endpoint", async () => {
+  it("streams serve events from the global event endpoint", async () => {
     const { client } = await clientFor();
-    const sid = await client.createSession();
     const seen: string[] = [];
-    for await (const ev of client.streamEvents(sid)) seen.push(ev.type);
+    for await (const ev of client.streamEvents()) seen.push(ev.type);
     expect(seen).toContain("message.part.delta");
     expect(seen).toContain("session.idle");
   });

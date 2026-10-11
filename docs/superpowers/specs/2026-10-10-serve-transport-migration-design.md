@@ -1,7 +1,7 @@
 # Migração do transporte: `opencode run` (CLI) → `opencode serve` (HTTP)
 
 - **Data:** 2026-10-10
-- **Status:** aprovado (aguardando revisão do spec)
+- **Status:** implementado e mergeado; §3.3/§6.2 **corrigidos** após validação contra o daemon real (ver nota no fim do §3.3)
 - **Origem:** sessão de brainstorming (`superpowers:brainstorming`)
 - **Substitui parcialmente:** premissas do `docs/plan.md` §2 e §3.5 (ver §3)
 
@@ -70,12 +70,33 @@ decisão de escopo — não usamos sessões reais nesta migração.
 - `POST /session` → cria sessão (aceita `agent`, `model`, `title`).
 - `POST /session/{id}/message` → aceita `model` (`{providerID,modelID}`),
   `system`, `variant`, `format`, `tools`, `parts` (obrigatório).
-- `GET /api/session/{id}/event?after=<cursor>` → **SSE por sessão** com cursor.
-- `GET /event`, `GET /global/event` → SSE global.
+- `GET /event` → **SSE global**; é a fonte do streaming. Envelope `{id, type, properties}`.
+  `GET /global/event` também funciona, mas embrulha cada evento em `{payload, directory}`.
+- `GET /api/session/{id}/event` → **NÃO usar**: em `1.18.35` não entrega nenhum
+  evento (medido: 0 eventos, timeout). O filtro por sessão é feito no cliente
+  sobre o `/event` global.
 - `POST /session/{id}/abort` → aborta geração (limpeza sem matar processo).
 - `DELETE /session/{id}` → remove sessão.
 - `OutputFormatJsonSchema` = `{type:"json_schema", schema, retryCount}`.
-- Evento `message.part.delta` = `{sessionID, messageID, partID, field, delta}`.
+
+**Protocolo de eventos (medido em `1.18.35`; o `/doc` descreve outro):**
+
+| Evento | Significado |
+|---|---|
+| `message.part.updated` | anuncia um part; `part.type === "text"` marca o `partID` como texto da resposta |
+| `message.part.delta` | `{sessionID, messageID, partID, field, delta}` — **dispara também para o part de `reasoning`**, ambos com `field:"text"` |
+| `session.idle` | **terminal** (a sessão ficou ociosa) |
+| `message.updated` | **não é terminal**: dispara para a mensagem do *usuário* segundos antes da resposta |
+
+Duas armadilhas que o design precisa respeitar:
+
+1. Um delta só é texto da resposta se o seu `partID` foi visto antes num
+   `message.part.updated` de tipo `text`; caso contrário é raciocínio interno e
+   **não** pode ser emitido como `content`.
+2. `message.updated` não encerra o turno; `session.idle` encerra.
+
+Os eventos `session.next.*` (ex.: `session.next.text.delta`) existem no OpenAPI
+mas o daemon **não os emite** hoje — não confiar neles.
 
 ### 3.4 `tools` no serve ≠ tools do chamador
 
@@ -146,7 +167,9 @@ Três unidades novas, cada uma com propósito único e testável isolado:
   responde `healthy`, usa; senão spawna `opencode serve --hostname 127.0.0.1`,
   espera readiness (timeout configurável) e encerra no shutdown.
 - **`serve/client.ts`** — transporte. Métodos finos sobre os endpoints de §3.3.
-- **`serve/events.ts`** — parsing dos blocos SSE (`data:`/`[DONE]`) em eventos.
+- **`serve/events.ts`** — parsing dos blocos SSE e projeção dos eventos em
+  deltas de texto (`projectEvent`), com o filtro de sessão e a separação
+  texto/raciocínio de §3.3.
 
 `runner.ts` (spawn por request) desaparece. O restante do wrapper fica intacto —
 é uma troca de substrato, não uma reescrita.
@@ -167,14 +190,22 @@ Três unidades novas, cada uma com propósito único e testável isolado:
 ### 6.2 `stream: true`
 
 1. Passos 1–6 de §6.1.
-2. Abre `GET /api/session/{id}/event` **antes** de postar a mensagem.
-3. Posta a mensagem em paralelo (o serve a processa; deltas chegam pelo SSE).
-4. Cada `message.part.delta` com `field:"text"` → chunk `delta.content`.
-5. Ao terminar: emite `tool_calls` (§7) ou `finish_reason`; `[DONE]`; fecha o
-   stream; `DELETE` a sessão.
+2. Abre `GET /event` **antes** de postar a mensagem.
+3. Posta a mensagem em paralelo (o serve a processa; os eventos chegam pelo SSE).
+4. Filtra os eventos pelo nosso `sessionID` e projeta-os (§3.3): registra os
+   `partID` de tipo `text`, emite `delta` **apenas** desses parts, encerra em
+   `session.idle`.
+5. O resultado autoritativo (texto final, `finish`, `tokens`, `structured`) vem do
+   `POST /session/{id}/message` bufferizado — **nada é reconstruído a partir dos
+   deltas**. Ao terminar: emite `tool_calls` (§7) ou `finish_reason`; `[DONE]`;
+   fecha o stream; `DELETE` a sessão.
 
-**Efeito observável:** sai o blob único e entra streaming incremental (medido: 9
-deltas no mesmo prompt). Latência cai de ~7,3 s para ~2,8 s.
+No modo `json_schema` (`required`/nomeada) não há prosa a streamar: o turno é
+bufferizado como em §6.1 e a chamada sai do `info.structured`.
+
+**Efeito observável (medido ponta a ponta contra o daemon real):** sai o blob
+único e entram deltas incrementais (7 no prompt de teste), sem vazar o raciocínio
+interno.
 
 ## 7. Tools
 

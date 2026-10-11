@@ -108,8 +108,10 @@ export class ServeClient {
     await this.request(`/session/${sessionId}/abort`, { method: "POST", signal: AbortSignal.timeout(15_000) });
   }
 
-  async *streamEvents(sessionId: string, signal?: AbortSignal): AsyncGenerator<ServeEvent> {
-    const res = await this.request(`/api/session/${sessionId}/event`, { signal });
+  // The GLOBAL event stream: the per-session endpoint is silent on 1.18.35, so the
+  // caller filters by sessionID (see serve/events.ts).
+  async *streamEvents(signal?: AbortSignal): AsyncGenerator<ServeEvent> {
+    const res = await this.request("/event", { signal });
     if (!res.ok || !res.body) throw new ServeHttpError(res.status, "event stream unavailable");
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -126,6 +128,9 @@ export class ServeClient {
           if (ev) yield ev;
         }
       }
+      // A final event not followed by a blank line still counts.
+      const tail = parseSseBlock(buffer);
+      if (tail) yield tail;
     } finally {
       reader.releaseLock();
     }

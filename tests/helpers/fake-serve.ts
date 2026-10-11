@@ -52,17 +52,21 @@ export async function startFakeServe(opts: FakeServeOptions = {}): Promise<FakeS
       if (opts.failMessage) return sendJson(opts.failMessage, { error: "boom" });
       return sendJson(200, { info: { finish: "stop" }, parts: [{ type: "text", text: opts.text ?? "pong" }] });
     }
-    if (url.startsWith("/api/session/") && url.endsWith("/event")) {
+    if (url === "/event") {
       res.writeHead(200, { "content-type": "text/event-stream" });
       if (opts.hangEventStream) {
         res.flushHeaders();
-        res.write(`data: ${JSON.stringify({ type: "session.created", properties: {} })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`);
         return;
       }
+      const sid = "ses_fake";
+      // The text part is announced before its deltas: a delta is only answer text
+      // when its partID was seen on a part of type "text" (see serve/events.ts).
+      res.write(`data: ${JSON.stringify({ type: "message.part.updated", properties: { sessionID: sid, part: { id: "prt_1", type: "text", text: "" } } })}\n\n`);
       for (const d of deltas) {
-        res.write(`data: ${JSON.stringify({ type: "message.part.delta", properties: { field: "text", delta: d } })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "message.part.delta", properties: { sessionID: sid, partID: "prt_1", field: "text", delta: d } })}\n\n`);
       }
-      res.write(`data: ${JSON.stringify({ type: "session.idle", properties: {} })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "session.idle", properties: { sessionID: sid } })}\n\n`);
       return res.end();
     }
     if (url.startsWith("/session/") && req.method === "DELETE") {

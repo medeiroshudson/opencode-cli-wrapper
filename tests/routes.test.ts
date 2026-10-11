@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { wireClientDisconnect } from "../src/routes/chat.js";
+import { getServeClient } from "../src/lib/serve/runtime.js";
 
 const catalogFixture = [
   { canonical: "opencode/mimo-v2.6-flash-free", provider: "opencode", id: "mimo-v2.6-flash-free", limits: { context: 200000, input: 160000, output: 32000 } },
@@ -35,6 +36,13 @@ function contentDeltas(body: string): string[] {
     .map((chunk) => chunk.choices[0]?.delta.content)
     .filter((value): value is string => typeof value === "string");
 }
+
+// The serve event shapes the mocked stream must speak: a text part is announced
+// before its deltas, and the turn ends on session.idle (NOT message.updated, which
+// fires for the user's own message).
+const textPart = () => ({ type: "message.part.updated", properties: { sessionID: "ses_test", part: { id: "prt_1", type: "text", text: "" } } });
+const delta = (d: string) => ({ type: "message.part.delta", properties: { sessionID: "ses_test", partID: "prt_1", field: "text", delta: d } });
+const idleEvent = () => ({ type: "session.idle", properties: { sessionID: "ses_test" } });
 
 const { getCatalogMock, useRealCatalog, ensureReadyMock, callLog } = vi.hoisted(() => ({
   getCatalogMock: vi.fn(),
@@ -94,6 +102,15 @@ describe("Routes (P6/P7)", () => {
 
   beforeEach(() => {
     vi.stubEnv("API_KEY", "test-inbound-key");
+    // The runtime mock hands back ONE shared client for the whole file, so a spy
+    // installed by one test would otherwise leak into the next. Restore the
+    // defaults here; each test that needs a different shape spies on top.
+    const client = getServeClient() as unknown as Record<string, unknown>;
+    client.createSession = async () => "ses_test";
+    client.postMessage = async () => ({ info: { finish: "stop" }, parts: [{ type: "text", text: "pong" }] });
+    client.deleteSession = async () => undefined;
+    client.abortSession = async () => undefined;
+    delete client.streamEvents;
     callLog.length = 0;
     ensureReadyMock.mockReset();
     ensureReadyMock.mockImplementation(async () => {
@@ -244,9 +261,10 @@ describe("Routes (P6/P7)", () => {
     const { getServeClient } = await import("../src/lib/serve/runtime.js");
     const client = getServeClient() as unknown as { streamEvents: () => AsyncGenerator<unknown> };
     client.streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "he" } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: "llo" } };
-      yield { type: "session.idle", properties: {} };
+      yield textPart();
+      yield delta("he");
+      yield delta("llo");
+      yield idleEvent();
     } as never;
 
     const res = await app.inject({
@@ -269,8 +287,9 @@ describe("Routes (P6/P7)", () => {
     const deleteSpy = vi.spyOn(client, "deleteSession").mockResolvedValue(undefined);
     const abortSpy = vi.spyOn(client, "abortSession").mockResolvedValue(undefined);
     (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "x" } };
-      yield { type: "session.idle", properties: {} };
+      yield textPart();
+      yield delta("x");
+      yield idleEvent();
     } as never;
 
     const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
@@ -296,7 +315,8 @@ describe("Routes (P6/P7)", () => {
     abortSpy.mockClear();
     deleteSpy.mockClear();
     (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "x" } };
+      yield textPart();
+      yield delta("x");
       throw new Error("event stream dropped");
     } as never;
 
@@ -321,8 +341,9 @@ describe("Routes (P6/P7)", () => {
     abortSpy.mockClear();
     deleteSpy.mockClear();
     (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "x" } };
-      yield { type: "session.idle", properties: {} };
+      yield textPart();
+      yield delta("x");
+      yield idleEvent();
     } as never;
 
     const { runStreamingTurn } = await import("../src/lib/opencode/turn.js");
@@ -364,13 +385,12 @@ describe("Routes (P6/P7)", () => {
   it("emits tool_calls (and no fence content) when streaming a required tool_choice", async () => {
     const { getServeClient } = await import("../src/lib/serve/runtime.js");
     const client = getServeClient();
-    // The model honours `format: json_schema` and the fence arrives split across deltas.
-    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: '```tool_call\n{"name":"get_weather",' } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: '"arguments":{"location":"Paris"}}\n```' } };
-      yield { type: "session.idle", properties: {} };
-    } as never;
-    const postSpy = vi.spyOn(client, "postMessage");
+    // A required turn is schema-constrained: it answers with a tool call, not prose,
+    // so nothing is streamed and the call comes from the buffered response.
+    const postSpy = vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "tool-calls", structured: { name: "get_weather", arguments: '{"location":"Paris"}' } },
+      parts: [{ type: "step-start" }],
+    });
 
     const res = await app.inject({
       method: "POST",
@@ -401,9 +421,10 @@ describe("Routes (P6/P7)", () => {
     const { getServeClient } = await import("../src/lib/serve/runtime.js");
     const client = getServeClient();
     (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "he" } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: "llo" } };
-      yield { type: "session.idle", properties: {} };
+      yield textPart();
+      yield delta("he");
+      yield delta("llo");
+      yield idleEvent();
     } as never;
 
     const res = await app.inject({
@@ -428,13 +449,20 @@ describe("Routes (P6/P7)", () => {
     const { getServeClient } = await import("../src/lib/serve/runtime.js");
     const client = getServeClient();
     (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "Let me check.\n``" } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: "`tool_call\n" } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: '{"name":"get_weather","arguments":{"location":"Paris"}}' } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: "\n``" } };
-      yield { type: "message.part.delta", properties: { field: "text", delta: "`" } };
-      yield { type: "session.idle", properties: {} };
+      yield textPart();
+      yield delta("Let me check.\n``");
+      yield delta("`tool_call\n");
+      yield delta('{"name":"get_weather","arguments":{"location":"Paris"}}');
+      yield delta("\n``");
+      yield delta("`");
+      yield idleEvent();
     } as never;
+    // The buffered response carries the same text the stream did (the real serve
+    // returns the finished message), which is where the tool call is parsed from.
+    vi.spyOn(client, "postMessage").mockResolvedValueOnce({
+      info: { finish: "stop" },
+      parts: [{ type: "text", text: 'Let me check.\n```tool_call\n{"name":"get_weather","arguments":{"location":"Paris"}}\n```' }],
+    });
 
     const res = await app.inject({
       method: "POST",
@@ -520,9 +548,6 @@ describe("Routes (P6/P7)", () => {
   it("reads the structured call for a streaming required turn that streams no text", async () => {
     const { getServeClient } = await import("../src/lib/serve/runtime.js");
     const client = getServeClient();
-    (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "session.idle", properties: {} };
-    } as never;
     vi.spyOn(client, "postMessage").mockResolvedValueOnce({
       info: { finish: "tool-calls", structured: { name: "get_weather", arguments: { location: "Paris" } } },
       parts: [],
@@ -705,7 +730,8 @@ describe("Routes (P6/P7)", () => {
     const { getServeClient } = await import("../src/lib/serve/runtime.js");
     const client = getServeClient();
     (client as unknown as { streamEvents: () => AsyncGenerator<unknown> }).streamEvents = async function* () {
-      yield { type: "message.part.delta", properties: { field: "text", delta: "par" } };
+      yield textPart();
+      yield delta("par");
       throw new Error("event stream dropped");
     } as never;
 

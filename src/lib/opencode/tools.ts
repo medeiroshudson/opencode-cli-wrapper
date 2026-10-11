@@ -214,10 +214,11 @@ export function parseToolCalls(
   known?: ReadonlySet<string>,
 ): { content: string; calls: ParsedCall[] } {
   const calls: ParsedCall[] = [];
-  let content = text.replace(FENCE, (full, inner: string) => {
+  // A ```tool_call block is never answer content: strip it even when it does not
+  // parse (unknown tool name / malformed JSON), or it leaks to the client as text.
+  let content = text.replace(FENCE, (_full, inner: string) => {
     const parsed = tryParseCall(inner, known);
-    if (!parsed) return full;
-    calls.push(parsed);
+    if (parsed) calls.push(parsed);
     return "";
   });
 
