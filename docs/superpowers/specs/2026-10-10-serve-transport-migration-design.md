@@ -219,7 +219,7 @@ interno.
 
 | `tool_choice` | Mecanismo | Razão |
 |---|---|---|
-| `required` / nomeada | `format: json_schema` do serve (com `retryCount`) | constrange o modelo ao JSON → mais confiável que fence. O cliente **quer** uma chamada, então não há texto natural a streamar |
+| `required` / nomeada | `format: json_schema` do serve (com `retryCount`), **sem** instrução de fence no prompt | constrange o modelo ao JSON → mais confiável que fence. O cliente **quer** uma chamada, então não há texto natural a streamar |
 | `auto` / omitido | Instrução + parsing de fence | permite resposta em texto natural e streaming normal; aceita a flakiness residual |
 | `none` | Instrução omitida (tools não renderizadas) | o cliente proíbe chamadas; não há o que emular |
 
@@ -229,6 +229,13 @@ interno.
    `content || text`).
 2. **Parser tolerante:** aceita bloco cercado *e* objeto JSON solto, e múltiplas
    chamadas.
+3. **Instrução e `json_schema` são mutuamente exclusivos** (medido 2026-10-11):
+   no modo `required`/nomeada a instrução de fence **não** é injetada. Com os
+   dois no prompt, o modelo livre segue a instrução em vez do schema e responde
+   com um bloco ` ```tool_call ` em texto — que não satisfaz o schema — e o
+   serve falha o turno com `StructuredOutputError` (`retries: 0`; o
+   `retryCount` não entra em ação). A/B no mesmo daemon: com instrução 0/4,
+   sem instrução 4/4.
 
 ### 7.3 Risco explícito
 
@@ -242,6 +249,12 @@ ocorre na implementação.
 - **Daemon caído** → `ensureReady()` reergue; 1 retry.
 - **Erro do upstream** → mapeia para formas OpenAI (429/502/500/404) reusando
   `toOpenAIErrorBody`.
+- **Falha dentro de 200** (medido 2026-10-11): o serve reporta uma geração
+  falha com HTTP 200 e o erro em `info.error`
+  (`{name, data:{message, statusCode}}` — ex. `StructuredOutputError`,
+  `APIError`). `assemble()` lança `TurnFailedError` com esse payload; o
+  `statusCode` upstream sobrevive no mapeamento (4xx → 4xx [OI], resto → 502).
+  Sem isso, uma rejeição de schema virava uma completion vazia "bem-sucedida".
 - **Timeout** → `POST /session/{id}/abort` (não mata processo) — limpeza mais
   limpa que o `SIGKILL` atual.
 - **Sessão órfã** → `DELETE` best-effort no `finally`.

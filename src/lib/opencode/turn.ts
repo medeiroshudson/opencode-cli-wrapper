@@ -41,6 +41,35 @@ function textFromParts(res: ServeMessageResponse): string {
   return (res.parts ?? []).filter((p) => p.type === "text").map((p) => p.text ?? "").join("");
 }
 
+// The serve answers a failed generation with HTTP 200 and the failure inside
+// info.error ({name, data:{message, statusCode}}). Surfacing it as an exception
+// keeps an upstream rejection (schema refused, rate limit) from becoming an
+// empty 200 completion that looks like the model chose not to answer.
+export class TurnFailedError extends Error {
+  override name = "TurnFailedError";
+  constructor(readonly statusCode: number | null, message: string) {
+    super(message);
+    Object.setPrototypeOf(this, TurnFailedError.prototype);
+  }
+}
+
+function upstreamError(res: ServeMessageResponse): TurnFailedError | null {
+  const raw = res.info?.error;
+  if (typeof raw !== "object" || raw === null) return null;
+  const err = raw as { name?: unknown; message?: unknown; data?: unknown };
+  const data = typeof err.data === "object" && err.data !== null ? (err.data as { message?: unknown; statusCode?: unknown }) : {};
+  const message =
+    typeof data.message === "string" && data.message.length > 0
+      ? data.message
+      : typeof err.message === "string" && err.message.length > 0
+        ? err.message
+        : typeof err.name === "string"
+          ? err.name
+          : "upstream generation failed";
+  const statusCode = typeof data.statusCode === "number" ? data.statusCode : null;
+  return new TurnFailedError(statusCode, message);
+}
+
 // A `format: json_schema` turn does not answer with text: serve puts the constrained
 // object on `info.structured` ({name, arguments}) and the text parts stay empty, so
 // reading only the parts makes a required/named turn look like an empty message.
@@ -80,6 +109,8 @@ function prepare(params: TurnParams): PreparedTurn {
 }
 
 function assemble(res: ServeMessageResponse, prepared: PreparedTurn, sessionId: string): TurnResult {
+  const failed = upstreamError(res);
+  if (failed) throw failed;
   const text = textFromParts(res);
   const parsed = parseToolCalls(text, prepared.known);
   const structured = prepared.wantsJson ? structuredCall(res, prepared.known) : null;

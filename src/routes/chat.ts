@@ -5,7 +5,7 @@ import type { ChatMessage } from "../lib/opencode/compose.js";
 import { applyAnchors, composePrompt } from "../lib/opencode/compose.js";
 import { CatalogError, getCatalog } from "../lib/opencode/models.js";
 import type { CatalogEntry } from "../lib/opencode/models.js";
-import { extractToolDefs, toolInstruction } from "../lib/opencode/tools.js";
+import { extractToolDefs, toolChoiceMode, toolInstruction } from "../lib/opencode/tools.js";
 import { runStreamingTurn, runTurn } from "../lib/opencode/turn.js";
 import { getServeClient, getServeSupervisor } from "../lib/serve/runtime.js";
 import type { DeltaContent } from "../lib/openai-format/index.js";
@@ -117,7 +117,14 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const tools = extractToolDefs(body);
-      const instruction = toolInstruction(tools, body.tool_choice);
+      // A required/named turn is constrained by `format: json_schema` alone
+      // (turn.ts prepare()). Adding the fence instruction on top makes the model
+      // follow the instruction instead of the schema — it answers with a
+      // ```tool_call block, which cannot satisfy the schema, and the serve fails
+      // the turn with StructuredOutputError. Measured 4/4 fail with it, 4/4 pass
+      // without.
+      const mode = toolChoiceMode(body.tool_choice);
+      const instruction = mode === "required" || typeof mode === "object" ? null : toolInstruction(tools, body.tool_choice);
       let prompt = applyAnchors(composePrompt(body.messages), {
         temperature: body.temperature,
         maxTokens: body.max_tokens,

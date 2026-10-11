@@ -21,7 +21,14 @@ export interface ServeTokens {
 export interface ServeMessageResponse {
   // `structured` carries the `format: json_schema` result ({name, arguments}); it is
   // NOT returned as a text part, so a schema-constrained turn must read it here.
-  info?: { finish?: string; tokens?: ServeTokens; structured?: unknown };
+  // `error` carries a failed generation inside a 200 (e.g. an upstream schema or
+  // rate-limit rejection); turn.ts surfaces it instead of returning empty text.
+  info?: {
+    finish?: string;
+    tokens?: ServeTokens;
+    structured?: unknown;
+    error?: { name?: string; message?: string; data?: { message?: string; statusCode?: number } };
+  };
   parts?: Array<{ type: string; text?: string }>;
 }
 
