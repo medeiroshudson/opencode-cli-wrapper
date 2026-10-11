@@ -102,4 +102,22 @@ if (isMain) {
     app.log.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   });
+
+  // Without a signal handler the supervised `opencode serve` outlives the wrapper
+  // on Ctrl-C / `docker stop`: the onClose hook that stops it only runs when
+  // app.close() is called, and nothing else calls it.
+  let closing = false;
+  const shutdown = (signal: string): void => {
+    if (closing) return;
+    closing = true;
+    app.log.info(`received ${signal}, shutting down`);
+    // Bounded: a stuck in-flight request must not block the daemon teardown.
+    setTimeout(() => process.exit(0), 10_000);
+    app.close().then(
+      () => process.exit(0),
+      () => process.exit(0),
+    );
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }

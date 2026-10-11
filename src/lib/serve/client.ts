@@ -110,29 +110,53 @@ export class ServeClient {
 
   // The GLOBAL event stream: the per-session endpoint is silent on 1.18.35, so the
   // caller filters by sessionID (see serve/events.ts).
+  //
+  // Bounded by IDLENESS, not by total duration: the deadline is re-armed on every
+  // chunk, so a long generation that keeps producing events is never cut, while a
+  // stream that goes silent (or never connects) still aborts after `timeoutMs`.
   async *streamEvents(signal?: AbortSignal): AsyncGenerator<ServeEvent> {
-    const res = await this.request("/event", { signal });
-    if (!res.ok || !res.body) throw new ServeHttpError(res.status, "event stream unavailable");
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+    const idle = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bump = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => idle.abort(new Error("event stream idle timeout")), this.opts.timeoutMs);
+    };
+    const combined = signal ? AbortSignal.any([signal, idle.signal]) : idle.signal;
+    // A pending read is raced against the abort so an idle stream (or a caller
+    // disconnect) interrupts immediately, rather than only at the next chunk.
+    const aborted = new Promise<never>((_, reject) => {
+      const fail = (): void => reject(new Error("event stream aborted"));
+      if (combined.aborted) fail();
+      else combined.addEventListener("abort", fail, { once: true });
+    });
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const { blocks, rest } = splitSseBlocks(buffer);
-        buffer = rest;
-        for (const block of blocks) {
-          const ev = parseSseBlock(block);
-          if (ev) yield ev;
+      bump(); // also bounds the connect, before any byte arrives
+      const res = await this.fetchImpl(`${this.opts.baseUrl}/event`, { signal: combined });
+      if (!res.ok || !res.body) throw new ServeHttpError(res.status, "event stream unavailable");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { done, value } = await Promise.race([reader.read(), aborted]);
+          if (done) break;
+          bump();
+          buffer += decoder.decode(value, { stream: true });
+          const { blocks, rest } = splitSseBlocks(buffer);
+          buffer = rest;
+          for (const block of blocks) {
+            const ev = parseSseBlock(block);
+            if (ev) yield ev;
+          }
         }
+        // A final event not followed by a blank line still counts.
+        const tail = parseSseBlock(buffer);
+        if (tail) yield tail;
+      } finally {
+        reader.releaseLock();
       }
-      // A final event not followed by a blank line still counts.
-      const tail = parseSseBlock(buffer);
-      if (tail) yield tail;
     } finally {
-      reader.releaseLock();
+      if (timer) clearTimeout(timer);
     }
   }
 }
