@@ -12,13 +12,38 @@ export interface ChatToolCall {
 
 export interface ChatMessage {
   role: string;
-  content: string | null;
+  content: string | null | unknown[];
   tool_calls?: ChatToolCall[];
+}
+
+// A caller may send content as Anthropic-style blocks (`[{type:"text",text:"…"}]`)
+// instead of a bare string. Concatenate the text blocks (dropping empty ones);
+// non-text blocks have no text representation in this pipeline and are ignored.
+function textFromBlock(block: unknown): string {
+  if (typeof block === "string") return block;
+  if (typeof block !== "object" || block === null) return "";
+  const text = (block as { text?: unknown }).text;
+  return typeof text === "string" ? text : "";
 }
 
 export function normalizeContent(content: unknown): string {
   if (content == null) return "";
+  if (Array.isArray(content)) {
+    return content.map(textFromBlock).filter((part) => part.length > 0).join("");
+  }
   return String(content);
+}
+
+// The turn answers the last USER message, not necessarily the last message: a
+// trailing system turn (e.g. a hook reminder appended after the conversation) would
+// otherwise become the question and the real ask would be buried in history. Falls
+// back to the last message when the conversation has no user turn at all.
+function questionIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const role = messages[i]?.role;
+    if (typeof role === "string" && role.toLowerCase() === "user") return i;
+  }
+  return messages.length - 1;
 }
 
 export function composePrompt(messages: ChatMessage[]): string {
@@ -26,11 +51,12 @@ export function composePrompt(messages: ChatMessage[]): string {
     throw new Error("composePrompt expects a non-empty array of messages");
   }
 
-  const lastIndex = messages.length - 1;
+  const target = questionIndex(messages);
   const systemContents: string[] = [];
   const history: string[] = [];
 
-  for (let i = 0; i < lastIndex; i++) {
+  for (let i = 0; i < messages.length; i++) {
+    if (i === target) continue;
     const message = messages[i];
     const role = message && message.role ? String(message.role) : "";
     const content = normalizeContent(message?.content);
@@ -48,7 +74,7 @@ export function composePrompt(messages: ChatMessage[]): string {
 
   const systemJoined = systemContents.join("\n");
   const historySection = history.join("\n");
-  const lastContent = normalizeContent(messages[lastIndex]?.content);
+  const lastContent = normalizeContent(messages[target]?.content);
 
   const lines: string[] = [
     "You are an expert assistant. Below is a conversation with a user.",

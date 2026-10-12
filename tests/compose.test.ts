@@ -90,6 +90,69 @@ describe("composePrompt (P4)", () => {
     expect(normalizeContent(42)).toBe("42");
     expect(normalizeContent("x")).toBe("x");
   });
+
+  it("flattens Anthropic-style content blocks", () => {
+    expect(
+      normalizeContent([
+        { type: "text", text: "" },
+        { type: "text", text: "You are " },
+        { type: "text", text: "an agent." },
+      ]),
+    ).toBe("You are an agent.");
+    expect(normalizeContent([])).toBe("");
+    expect(normalizeContent(["a", "b"])).toBe("ab");
+    // A non-text block has no text representation and must not leak as "[object Object]".
+    expect(normalizeContent([{ type: "image", source: {} }])).toBe("");
+  });
+
+  it("composes a system message whose content is a block array", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: [{ type: "text", text: "" }, { type: "text", text: "be terse" }] },
+      { role: "user", content: "hi" },
+    ];
+
+    const prompt = composePrompt(messages);
+
+    expect(prompt).toContain("System: be terse");
+    expect(prompt).toContain("Question: hi");
+  });
+
+  it("answers the last user turn even when a later system turn follows", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "How do I add TTS?" },
+      { role: "system", content: "SessionStart hook: superpowers enabled" },
+    ];
+
+    const prompt = composePrompt(messages);
+
+    expect(prompt.endsWith("Question: How do I add TTS?")).toBe(true);
+    expect(prompt).toContain("System: SessionStart hook: superpowers enabled");
+    expect(prompt).not.toContain("Question: SessionStart hook");
+  });
+
+  it("keeps intervening turns in history when the question is not last", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "first" },
+      { role: "user", content: "second" },
+      { role: "system", content: "trailing hook" },
+    ];
+
+    const prompt = composePrompt(messages);
+
+    expect(prompt).toContain("User: first");
+    expect(prompt.endsWith("Question: second")).toBe(true);
+  });
+
+  it("falls back to the last message when there is no user turn", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "assistant", content: "hi there" },
+    ];
+
+    const prompt = composePrompt(messages);
+
+    expect(prompt.endsWith("Question: hi there")).toBe(true);
+  });
 });
 
 describe("prompt anchors", () => {

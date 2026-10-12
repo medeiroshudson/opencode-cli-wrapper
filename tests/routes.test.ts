@@ -197,6 +197,48 @@ describe("Routes (P6/P7)", () => {
     expect(res.json().error.type).toBe("invalid_request_error");
   });
 
+  it("accepts Anthropic-style block arrays as message content", async () => {
+    const postSpy = vi.spyOn(getServeClient(), "postMessage");
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [
+          { role: "system", content: [{ type: "text", text: "" }, { type: "text", text: "be terse" }] },
+          { role: "user", content: "hi" },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const prompt = (postSpy.mock.calls[0]?.[1] as { parts: Array<{ text: string }> }).parts[0]?.text ?? "";
+    expect(prompt).toContain("System: be terse");
+    expect(prompt).not.toContain("[object Object]");
+  });
+
+  it("answers the last user turn when a trailing system turn is present", async () => {
+    const postSpy = vi.spyOn(getServeClient(), "postMessage");
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: inboundHeaders,
+      payload: {
+        model: "mimo-v2.6-flash-free",
+        messages: [
+          { role: "user", content: "Temos uma api nativa da Apple para TTS?" },
+          { role: "system", content: "SessionStart hook: superpowers enabled" },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const prompt = (postSpy.mock.calls[0]?.[1] as { parts: Array<{ text: string }> }).parts[0]?.text ?? "";
+    expect(prompt.endsWith("Question: Temos uma api nativa da Apple para TTS?")).toBe(true);
+    expect(prompt).not.toContain("Question: SessionStart hook");
+  });
+
   it("rejects a model absent from the catalog with 404", async () => {
     const res = await app.inject({
       method: "POST",

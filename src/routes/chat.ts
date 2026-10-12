@@ -36,8 +36,10 @@ const chatBodySchema = {
           required: ["role", "content"],
           properties: {
             role: { type: "string" },
-            // An OpenAI assistant turn that only calls a tool sends `content: null`.
-            content: { type: ["string", "null"] },
+            // A tool-only assistant turn sends `content: null`; a caller may also send
+            // Anthropic-style blocks (`[{type:"text",text:"…"}]`). compose.normalizeContent
+            // flattens that array form.
+            content: { type: ["string", "null", "array"], items: { type: ["object", "string"] } },
           },
         },
       },
