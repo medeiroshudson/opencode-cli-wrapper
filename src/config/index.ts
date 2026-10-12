@@ -1,4 +1,3 @@
-import type { AuthContext } from "../lib/opencode/auth.js";
 import type { CatalogEntry } from "../lib/opencode/models.js";
 
 const LOOPBACK_NO_PROXY = "localhost,127.0.0.1,::1";
@@ -149,15 +148,7 @@ function finiteNumber(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-export function visibleModels(entries: CatalogEntry[], auth: AuthContext): CatalogEntry[] {
-  // The wrapper always authenticates its own requests, so the credential-less branch
-  // is not reached by a route today. It stays because it encodes the free-tier
-  // promise for the callers that pass an AuthContext without a credential.
-  return auth.enabled ? entries : entries.filter((entry) => entry.id.endsWith("-free"));
-}
-
 export function listModels(
-  auth: AuthContext,
   entries: CatalogEntry[],
 ): {
   object: "list";
@@ -173,7 +164,7 @@ export function listModels(
 } {
   return {
     object: "list",
-    data: dedupeById(visibleModels(entries, auth)).map((entry) => {
+    data: dedupeById(entries).map((entry) => {
       const data = {
         id: entry.id,
         object: "model" as const,
@@ -224,14 +215,12 @@ export function modelsDevMetadata(entries: CatalogEntry[]): Record<string, Model
   );
 }
 
-export function resolveModel(id: string, auth: AuthContext, entries: CatalogEntry[]): string {
-  const visible = visibleModels(entries, auth);
-
-  const exact = visible.find((entry) => entry.canonical === id);
+export function resolveModel(id: string, entries: CatalogEntry[]): string {
+  const exact = entries.find((entry) => entry.canonical === id);
   if (exact) return exact.canonical;
 
-  const matches = visible.filter((entry) => entry.id === id);
+  const matches = entries.filter((entry) => entry.id === id);
   if (matches.length > 0) return matches.reduce(preferZen).canonical;
 
-  throw new ModelNotFoundError(`Model '${id}' not found in the visible model catalog.`);
+  throw new ModelNotFoundError(`Model '${id}' not found in the model catalog.`);
 }

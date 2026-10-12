@@ -82,9 +82,6 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     { schema: chatBodySchema },
     async (request, reply) => {
       const body = request.body;
-      // The wrapper has a single upstream credential (the host's opencode auth), so
-      // the whole catalog is visible — there is no per-request credential to read.
-      const auth = { enabled: true, token: null };
 
       // The daemon must be up before the catalog fetch: getServeClient() only
       // constructs a client, so a cold start would otherwise hit a dead port.
@@ -108,7 +105,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
 
       let canonicalModel: string;
       try {
-        canonicalModel = resolveModel(body.model, auth, entries);
+        canonicalModel = resolveModel(body.model, entries);
       } catch (err) {
         if (err instanceof ModelNotFoundError) {
           const mapped = toOpenAIErrorBody(err, 404);
