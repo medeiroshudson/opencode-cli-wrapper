@@ -36,6 +36,7 @@ vi.mock("../src/lib/serve/runtime.js", () => {
 
 const catalog = [
   { canonical: "opencode/mimo-v2.6-flash-free", provider: "opencode", id: "mimo-v2.6-flash-free", limits: null },
+  { canonical: "openai/gpt-6-luna", provider: "openai", id: "gpt-6-luna", limits: null },
 ];
 const authorization = { authorization: "Bearer test-inbound-key" };
 const chatPayload = { model: "mimo-v2.6-flash-free", messages: [{ role: "user", content: "hi" }] };
@@ -125,4 +126,24 @@ describe("Global route authentication", () => {
       parts: [{ type: "text", text: expect.any(String) }],
     });
   });
+
+  it.each(["gpt-6-luna", "openai/gpt-6-luna"])(
+    "runs the non-free model %s through the serve client with only the wrapper Bearer key",
+    async (model) => {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: authorization,
+        payload: { ...chatPayload, model },
+      });
+
+      expect(response.statusCode).toBe(200);
+      // A non-free model resolves to its canonical provider/id and runs on the
+      // server's existing OpenCode credentials: there is no per-request key header.
+      expect(postMessageMock).toHaveBeenCalledWith("ses_test", {
+        model: { providerID: "openai", modelID: "gpt-6-luna" },
+        parts: [{ type: "text", text: expect.any(String) }],
+      });
+    },
+  );
 });

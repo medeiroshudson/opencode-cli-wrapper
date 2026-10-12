@@ -144,6 +144,17 @@ describe("Routes (P6/P7)", () => {
     });
   });
 
+  it("GET /v1/models lists a non-free model without an extra header", async () => {
+    getCatalogMock.mockResolvedValueOnce([
+      { canonical: "openai/gpt-6-luna", provider: "openai", id: "gpt-6-luna", limits: null },
+    ]);
+
+    const res = await app.inject({ method: "GET", url: "/v1/models", headers: inboundHeaders });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual([{ id: "gpt-6-luna", object: "model", owned_by: "openai" }]);
+  });
+
   it("GET /models.dev.json returns the full flat catalog", async () => {
     const res = await app.inject({ method: "GET", url: "/models.dev.json", headers: inboundHeaders });
 
