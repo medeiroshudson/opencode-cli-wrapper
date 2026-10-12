@@ -40,7 +40,7 @@
 
             meta = {
               description = "OpenAI-compatible HTTP API that proxies the OpenCode CLI";
-              homepage = "https://github.com/medeiroshudson/opencode-cli-wrapper";
+              homepage = "https://github.com/medeiroshudson/opencode-wrapper";
               license = pkgs.lib.licenses.mit;
               mainProgram = "opencode-cli-wrapper";
               platforms = systems;

@@ -52,7 +52,7 @@ still works, but model requests fail upstream.
 Run the API directly with Nix:
 
 ```bash
-API_KEY=your-local-secret nix run github:mausch/opencode-cli-wrapper
+API_KEY=your-local-secret nix run github:medeiroshudson/opencode-wrapper
 ```
 
 The flake includes Node.js and OpenCode, so no separate installation is required. Your
@@ -64,10 +64,10 @@ The `opencode` flake input defaults to the locked `nixpkgs` input. Override it t
 OpenCode from another nixpkgs revision or from OpenCode's own flake:
 
 ```bash
-API_KEY=your-local-secret nix run github:mausch/opencode-cli-wrapper \
+API_KEY=your-local-secret nix run github:medeiroshudson/opencode-wrapper \
   --override-input opencode 'github:NixOS/nixpkgs/<revision>'
 
-API_KEY=your-local-secret nix run github:mausch/opencode-cli-wrapper \
+API_KEY=your-local-secret nix run github:medeiroshudson/opencode-wrapper \
   --override-input opencode 'github:anomalyco/opencode/<revision>'
 ```
 
@@ -81,7 +81,7 @@ already-installed executable instead, set `OPENCODE_BIN` to its absolute path:
 
 ```bash
 API_KEY=your-local-secret OPENCODE_BIN="$(command -v opencode)" \
-  nix run github:mausch/opencode-cli-wrapper
+  nix run github:medeiroshudson/opencode-wrapper
 ```
 
 ## Usage
